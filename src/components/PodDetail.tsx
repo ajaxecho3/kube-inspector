@@ -175,7 +175,7 @@ export function PodDetail({ pod, kubeConfig, onClose }: PodDetailProps) {
       {labelStr ? (
         <Box paddingX={1}>
           <Text dimColor>Labels: </Text>
-          <Text color="gray">
+          <Text>
             {labelStr.length > 100 ? labelStr.slice(0, 99) + "…" : labelStr}
           </Text>
         </Box>
@@ -300,8 +300,6 @@ export function PodDetail({ pod, kubeConfig, onClose }: PodDetailProps) {
               </Text>
             )}
             {visibleLines.map((line, i) => {
-              const isRecent =
-                !logSearch && follow && i >= visibleLines.length - 3;
               if (logSearch) {
                 const idx = line.toLowerCase().indexOf(logSearch.toLowerCase());
                 if (idx !== -1) {
@@ -316,14 +314,7 @@ export function PodDetail({ pod, kubeConfig, onClose }: PodDetailProps) {
                   );
                 }
               }
-              return (
-                <Text
-                  key={effectiveOffset + i}
-                  color={isRecent ? undefined : "gray"}
-                >
-                  {line}
-                </Text>
-              );
+              return <Text key={effectiveOffset + i}>{line}</Text>;
             })}
           </Box>
 
