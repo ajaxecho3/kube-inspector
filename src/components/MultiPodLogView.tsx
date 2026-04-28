@@ -14,6 +14,8 @@ interface PodPaneProps {
 }
 
 function PodPane({ pod, kubeConfig, isFocused }: PodPaneProps) {
+  const [scrollOffset, setScrollOffset] = useState(0);
+
   const namespace = pod.metadata?.namespace ?? "default";
   const podName = pod.metadata?.name ?? "";
   // Stream the first container by default
@@ -27,7 +29,25 @@ function PodPane({ pod, kubeConfig, isFocused }: PodPaneProps) {
     containerName,
   );
 
-  const tail = lines.slice(-TAIL_LINES);
+  useInput(
+    (_input, key) => {
+      if (key.upArrow) {
+        setScrollOffset((prev) =>
+          Math.min(Math.max(0, lines.length - TAIL_LINES), prev + 3),
+        );
+      }
+      if (key.downArrow) {
+        setScrollOffset((prev) => Math.max(0, prev - 3));
+      }
+    },
+    { isActive: isFocused },
+  );
+
+  const isFollowing = scrollOffset === 0;
+  const endIndex = lines.length - scrollOffset;
+  const startIndex = Math.max(0, endIndex - TAIL_LINES);
+  const visibleLines = lines.slice(startIndex, endIndex);
+
   const health = podHealth(pod);
   const healthColor =
     health === HealthStatus.Healthy
@@ -80,12 +100,8 @@ function PodPane({ pod, kubeConfig, isFocused }: PodPaneProps) {
         {lines.length === 0 && !error && (
           <Text dimColor>Waiting for logs…</Text>
         )}
-        {tail.map((line, i) => (
-          <Text
-            key={lines.length - tail.length + i}
-            color={i >= tail.length - 5 ? undefined : "gray"}
-            wrap="truncate"
-          >
+        {visibleLines.map((line, i) => (
+          <Text key={startIndex + i} wrap="truncate">
             {line}
           </Text>
         ))}
@@ -93,7 +109,10 @@ function PodPane({ pod, kubeConfig, isFocused }: PodPaneProps) {
 
       {/* Footer */}
       <Box paddingX={1}>
-        <Text dimColor>● follow · {lines.length} lines</Text>
+        <Text dimColor>
+          {isFollowing ? "● follow" : "⏸ paused"} · {lines.length} lines
+          {!isFollowing && ` (↑${scrollOffset})`}
+        </Text>
       </Box>
     </Box>
   );
@@ -135,7 +154,7 @@ export function MultiPodLogView({
           </Text>
           <Text dimColor>{pods.length} pods</Text>
         </Box>
-        <Text dimColor>[←→ / h/l] focus [Esc] back to table</Text>
+        <Text dimColor>[←→ / h/l] focus [↑↓] scroll [Esc] back to table</Text>
       </Box>
 
       {/* Panes */}

@@ -56,12 +56,7 @@ function ContainerTailPane({
           <Text dimColor>Waiting for logs...</Text>
         )}
         {tail.map((line, i) => (
-          <Text
-            key={lines.length - tail.length + i}
-            color={i >= tail.length - 5 ? undefined : "gray"}
-          >
-            {line}
-          </Text>
+          <Text key={lines.length - tail.length + i}>{line}</Text>
         ))}
       </Box>
 
