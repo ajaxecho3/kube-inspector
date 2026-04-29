@@ -36,9 +36,6 @@ interface AppProps {
 export function App({ mutationsEnabled, maxReplicas }: AppProps) {
   const { exit } = useApp();
   const { stdout } = useStdout();
-  // App-level chrome: header(1) + tabs(2) + padding top+bottom(2) + footer(2) = 7
-  const APP_CHROME = 7;
-  const tableMaxHeight = Math.max(5, (stdout?.rows ?? 24) - APP_CHROME);
   const [activeTab, setActiveTab] = useState(0);
   const [selectedIndex, setSelectedIndex] = useState(0);
   const [showContextSwitcher, setShowContextSwitcher] = useState(false);
@@ -85,6 +82,18 @@ export function App({ mutationsEnabled, maxReplicas }: AppProps) {
 
   const getPodHealth = useCallback((pod: V1Pod) => podHealth(pod), []);
   const { alerts, dismiss } = useAlerts(pods.resources, getPodHealth);
+
+  // Dynamic chrome: accounts for whether summary bar and alert banner are currently rendered
+  const isOverlay =
+    !!detailPod || multiPodView || showContextSwitcher || !!pendingMutation;
+  const appChrome =
+    1 + // header
+    2 + // tabs (border line + content row)
+    (isOverlay ? 0 : 1) + // summary bar (hidden in overlays)
+    (alerts[0] ? 3 : 0) + // alert banner when visible (top border + content + bottom border)
+    2; // footer (border line + text)
+  const tableMaxHeight = Math.max(5, (stdout?.rows ?? 24) - appChrome);
+  const activeNamespace = "all"; // read-only display; filtering wired in a future spec
 
   const connectionError = pods.error ?? deployments.error;
 
@@ -174,6 +183,7 @@ export function App({ mutationsEnabled, maxReplicas }: AppProps) {
         creationTimestamp: pod.metadata?.creationTimestamp,
         extra: `${phase} ${readyCount}/${cs.length || "?"}`,
         extra2: restarts > 0 ? `↺${restarts}  ${node}` : node,
+        extra3: pod.status?.podIP ?? "",
       };
     });
   }
@@ -190,6 +200,11 @@ export function App({ mutationsEnabled, maxReplicas }: AppProps) {
         creationTimestamp: d.metadata?.creationTimestamp,
         extra: `${d.status?.readyReplicas ?? 0}/${d.status?.replicas ?? 0} ready`,
         extra2: shortImage,
+        extra3: (() => {
+          const strat = d.spec?.strategy?.type ?? "RollingUpdate";
+          const surge = d.spec?.strategy?.rollingUpdate?.maxSurge;
+          return surge !== undefined ? `${strat} +${surge}` : strat;
+        })(),
       };
     });
   }
@@ -209,6 +224,13 @@ export function App({ mutationsEnabled, maxReplicas }: AppProps) {
         creationTimestamp: s.metadata?.creationTimestamp,
         extra: svcType,
         extra2: ports.slice(0, 26),
+        extra3: (() => {
+          if (s.spec?.type === "LoadBalancer") {
+            const ingress = s.status?.loadBalancer?.ingress;
+            return ingress?.[0]?.ip ?? ingress?.[0]?.hostname ?? "<pending>";
+          }
+          return s.spec?.clusterIP ?? "";
+        })(),
       };
     });
   }
@@ -223,6 +245,10 @@ export function App({ mutationsEnabled, maxReplicas }: AppProps) {
           ? HealthStatus.Healthy
           : HealthStatus.Degraded,
       creationTimestamp: ns.metadata?.creationTimestamp,
+      extra3: (() => {
+        const count = Object.keys(ns.metadata?.labels ?? {}).length;
+        return count > 0 ? `${count} label${count !== 1 ? "s" : ""}` : "";
+      })(),
     }));
   }
 
@@ -242,6 +268,7 @@ export function App({ mutationsEnabled, maxReplicas }: AppProps) {
         creationTimestamp: n.metadata?.creationTimestamp,
         extra: roles,
         extra2: version,
+        extra3: (n.status?.nodeInfo?.osImage ?? "").slice(0, 20),
       };
     });
   }
@@ -263,6 +290,7 @@ export function App({ mutationsEnabled, maxReplicas }: AppProps) {
         creationTimestamp: e.lastTimestamp,
         extra: e.reason ?? "",
         extra2: e.message?.slice(0, 38),
+        extra3: (e.count ?? 0) > 1 ? `×${e.count}` : "",
       }));
   }
 
@@ -274,6 +302,61 @@ export function App({ mutationsEnabled, maxReplicas }: AppProps) {
     buildNodeRows(),
     buildEventRows(),
   ];
+
+  const tabSummaries = tabRows.map((rows) => ({
+    total: rows.length,
+    critical: rows.filter((r) => r.status === HealthStatus.Critical).length,
+  }));
+
+  const TAB_RESOURCE_LABELS = [
+    "pods",
+    "deployments",
+    "services",
+    "namespaces",
+    "nodes",
+    "events",
+  ];
+  // Per-tab column header labels: [extraLabel, extra2Label, extra3Label]
+  const TAB_COL_LABELS: [string, string, string][] = [
+    ["PHASE", "NODE", "IP"],
+    ["REPLICAS", "IMAGE", "STRATEGY"],
+    ["TYPE", "PORTS", "CLUSTER IP"],
+    ["", "", "LABELS"],
+    ["ROLES", "VERSION", "OS"],
+    ["REASON", "MESSAGE", "COUNT"],
+  ];
+  const tabLoading = [
+    pods.loading,
+    deployments.loading,
+    services.loading,
+    namespaces.loading,
+    nodes.loading,
+    events.loading,
+  ];
+
+  function getFooterHints(): string {
+    if (showContextSwitcher || pendingMutation) {
+      return "[↑↓] Navigate  [Enter] Select  [Esc] Cancel";
+    }
+    if (detailPod) {
+      return "[↑↓] Scroll  [[] []] Container  [f] Follow  [/] Search  [Esc] Close";
+    }
+    if (multiPodView) {
+      return "[↑↓] Scroll  [Esc] Close";
+    }
+    const base = "[↑↓] Nav  [Tab] Switch  [/] Search  [c] Context  [q] Quit";
+    if (activeTab === 0) {
+      return mutationsEnabled
+        ? base + "  [Space] Select  [Enter] Detail  [d] Delete  [D] Force-del"
+        : base + "  [Space] Select  [Enter] Detail";
+    }
+    if (activeTab === 1) {
+      return mutationsEnabled
+        ? base + "  [Enter] Detail  [R] Restart  [s] Scale"
+        : base + "  [Enter] Detail";
+    }
+    return base;
+  }
 
   if (connectionError && pods.resources.size === 0) {
     return (
@@ -292,13 +375,17 @@ export function App({ mutationsEnabled, maxReplicas }: AppProps) {
       flexDirection="column"
       width={stdout?.columns ?? process.stdout.columns}
       height={stdout?.rows ?? process.stdout.rows}
+      paddingRight={2}
     >
       {/* Header */}
       <Box justifyContent="space-between" paddingX={1}>
         <Text bold color="cyan">
           kube-inspector
         </Text>
-        <Text dimColor>context: {kubeClient.currentContext}</Text>
+        <Box>
+          <Text dimColor>context: {kubeClient.currentContext} </Text>
+          <Text dimColor>ns: {activeNamespace}</Text>
+        </Box>
         <Text color={connectionError ? "yellow" : "green"}>
           {connectionError ? "⚠ reconnecting..." : "● connected"}
         </Text>
@@ -309,14 +396,53 @@ export function App({ mutationsEnabled, maxReplicas }: AppProps) {
         <AlertBanner
           message={alerts[0].message}
           onDismiss={() => dismiss(alerts[0].id)}
+          queueLength={alerts.length}
         />
       )}
 
       {/* Tabs */}
-      <NavTabs activeTab={activeTab} onTabChange={setActiveTab} />
+      <NavTabs
+        activeTab={activeTab}
+        onTabChange={setActiveTab}
+        tabSummaries={tabSummaries}
+      />
+
+      {/* Status summary bar — hidden when overlay/detail is active */}
+      {!detailPod &&
+        !multiPodView &&
+        !showContextSwitcher &&
+        !pendingMutation && (
+          <Box paddingX={1}>
+            {(() => {
+              const rows = tabRows[activeTab];
+              const total = rows.length;
+              const critical = rows.filter(
+                (r) => r.status === HealthStatus.Critical,
+              ).length;
+              const degraded = rows.filter(
+                (r) => r.status === HealthStatus.Degraded,
+              ).length;
+              const healthy = rows.filter(
+                (r) => r.status === HealthStatus.Healthy,
+              ).length;
+              return (
+                <>
+                  <Text dimColor>{total} total </Text>
+                  {critical > 0 && (
+                    <Text color="red">{critical} ● critical </Text>
+                  )}
+                  {degraded > 0 && (
+                    <Text color="yellow">{degraded} ● degraded </Text>
+                  )}
+                  <Text color="green">{healthy} ● healthy</Text>
+                </>
+              );
+            })()}
+          </Box>
+        )}
 
       {/* Main content */}
-      <Box flexGrow={1} padding={1}>
+      <Box flexGrow={1} paddingX={1}>
         {multiPodView ? (
           <MultiPodLogView
             pods={Array.from(pods.resources.values()).filter((p) =>
@@ -390,6 +516,11 @@ export function App({ mutationsEnabled, maxReplicas }: AppProps) {
             }
             maxHeight={tableMaxHeight}
             mutationsEnabled={mutationsEnabled}
+            loading={tabLoading[activeTab]}
+            resourceLabel={TAB_RESOURCE_LABELS[activeTab]}
+            extraLabel={TAB_COL_LABELS[activeTab][0]}
+            extra2Label={TAB_COL_LABELS[activeTab][1]}
+            extra3Label={TAB_COL_LABELS[activeTab][2]}
           />
         )}
       </Box>
@@ -403,12 +534,7 @@ export function App({ mutationsEnabled, maxReplicas }: AppProps) {
         borderLeft={false}
         borderRight={false}
       >
-        <Text dimColor>
-          [↑↓] Navigate [Tab] Switch tab [Enter] Detail [c] Context [q] Quit
-          {mutationsEnabled
-            ? "  [d] Delete  [R] Restart  [s] Scale"
-            : "  (mutations locked — use --enable-mutations)"}
-        </Text>
+        <Text dimColor>{getFooterHints()}</Text>
       </Box>
     </Box>
   );

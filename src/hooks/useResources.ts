@@ -6,6 +6,7 @@ type KubeObject = { metadata?: { uid?: string } };
 export interface UseResourcesResult<T> {
   resources: Map<string, T>;
   error: string | null;
+  loading: boolean;
 }
 
 interface UseResourcesOptions {
@@ -23,12 +24,15 @@ export function useResources<T extends KubeObject>(
 ): UseResourcesResult<T> {
   const [resources, setResources] = useState<Map<string, T>>(new Map());
   const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
   const retryCount = useRef(0);
   const abortRef = useRef<{ abort: () => void } | null>(null);
   const isMounted = useRef(true);
+  const firstEventRef = useRef(false);
 
   useEffect(() => {
     isMounted.current = true;
+    firstEventRef.current = false;
 
     async function startWatch() {
       const watch = new Watch(kubeConfig);
@@ -40,6 +44,11 @@ export function useResources<T extends KubeObject>(
             if (!isMounted.current) return;
             const uid = obj.metadata?.uid;
             if (!uid) return;
+
+            if (!firstEventRef.current) {
+              firstEventRef.current = true;
+              setLoading(false);
+            }
 
             setResources((prev) => {
               const next = new Map(prev);
@@ -54,6 +63,7 @@ export function useResources<T extends KubeObject>(
           (err: Error | null) => {
             if (!isMounted.current) return;
             if (err) {
+              setLoading(false);
               setError(err.message);
               const delay = Math.min(
                 BASE_BACKOFF_MS * 2 ** retryCount.current,
@@ -71,6 +81,7 @@ export function useResources<T extends KubeObject>(
         setError(null);
       } catch (err) {
         if (!isMounted.current) return;
+        setLoading(false);
         setError(String(err));
       }
     }
@@ -80,10 +91,11 @@ export function useResources<T extends KubeObject>(
     return () => {
       isMounted.current = false;
       abortRef.current?.abort();
-      // Clear stale resources so the new context starts with a blank slate
       setResources(new Map());
+      setLoading(true);
+      firstEventRef.current = false;
     };
   }, [kubeConfig, path]);
 
-  return { resources, error };
+  return { resources, error, loading };
 }

@@ -20,4 +20,26 @@ describe("AlertBanner", () => {
     );
     expect(lastFrame()).toContain("Esc");
   });
+
+  it("shows queue count when queueLength > 1", () => {
+    const { lastFrame } = render(
+      <AlertBanner
+        message="pod crashed"
+        onDismiss={() => {}}
+        queueLength={3}
+      />,
+    );
+    expect(lastFrame()).toContain("+2 more");
+  });
+
+  it("does not show queue count when queueLength is 1", () => {
+    const { lastFrame } = render(
+      <AlertBanner
+        message="pod crashed"
+        onDismiss={() => {}}
+        queueLength={1}
+      />,
+    );
+    expect(lastFrame()).not.toContain("more");
+  });
 });

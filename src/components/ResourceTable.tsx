@@ -12,9 +12,8 @@ export interface ResourceRow {
   creationTimestamp?: Date | string;
   extra?: string;
   extra2?: string;
+  extra3?: string;
 }
-
-const COL_EXTRA = 18;
 
 interface ResourceTableProps {
   rows: ResourceRow[];
@@ -25,10 +24,13 @@ interface ResourceTableProps {
   onToggleSelect?: (row: ResourceRow) => void;
   maxHeight?: number;
   mutationsEnabled: boolean;
+  loading?: boolean;
+  resourceLabel?: string;
+  extraLabel?: string;
+  extra2Label?: string;
+  extra3Label?: string;
 }
 
-const COL_NAME = 32;
-const COL_NS = 20;
 const COL_AGE = 6;
 
 const STATUS_LABEL: Record<HealthStatus, string> = {
@@ -45,6 +47,61 @@ const STATUS_COLOR: Record<HealthStatus, string> = {
 
 function padEnd(str: string, len: number): string {
   return str.length >= len ? str.slice(0, len - 1) + " " : str.padEnd(len);
+}
+
+function computeColumns(terminalWidth: number): {
+  colName: number;
+  colNs: number;
+  colExtra: number;
+  colExtra2: number;
+  colExtra3: number;
+  showExtra3: boolean;
+} {
+  // Reserve: checkbox(2) + status(12) + age(6) + paddingX(2) + gaps(4) = 26
+  const available = Math.max(60, terminalWidth) - 26;
+  const showExtra3 = terminalWidth >= 100;
+  if (showExtra3) {
+    // Distribute all available space across 4 variable columns
+    const colName = Math.max(24, Math.floor(available * 0.32));
+    const colNs = Math.max(14, Math.floor(available * 0.17));
+    const colExtra = Math.max(12, Math.floor(available * 0.2));
+    const colExtra2 = Math.max(12, Math.floor(available * 0.2));
+    const colExtra3 = Math.max(
+      10,
+      available - colName - colNs - colExtra - colExtra2,
+    );
+    return { colName, colNs, colExtra, colExtra2, colExtra3, showExtra3 };
+  } else {
+    const colName = Math.max(24, Math.floor(available * 0.4));
+    const colNs = Math.max(14, Math.floor(available * 0.22));
+    const colExtra = Math.max(12, Math.floor(available * 0.23));
+    const colExtra2 = Math.max(10, available - colName - colNs - colExtra);
+    return { colName, colNs, colExtra, colExtra2, colExtra3: 0, showExtra3 };
+  }
+}
+
+function ProgressBar({
+  start,
+  visible,
+  total,
+}: {
+  start: number;
+  visible: number;
+  total: number;
+}) {
+  const barWidth = 10;
+  const maxStart = Math.max(1, total - visible);
+  const filled = Math.round((start / maxStart) * barWidth);
+  const safeFilled = Math.min(barWidth, Math.max(0, filled));
+  return (
+    <Text dimColor>
+      {"[" +
+        "█".repeat(safeFilled) +
+        "░".repeat(barWidth - safeFilled) +
+        "]" +
+        ` ${start + 1}\u2013${Math.min(start + visible, total)}/${total}`}
+    </Text>
+  );
 }
 
 function HighlightText({ text, query }: { text: string; query: string }) {
@@ -71,8 +128,27 @@ export function ResourceTable({
   onToggleSelect,
   maxHeight,
   mutationsEnabled,
+  loading,
+  resourceLabel,
+  extraLabel = "DETAILS",
+  extra2Label = "INFO",
+  extra3Label = "MORE",
 }: ResourceTableProps) {
   const { stdout } = useStdout();
+  const { colName, colNs, colExtra, colExtra2, colExtra3, showExtra3 } =
+    computeColumns(stdout?.columns ?? 120);
+  const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+  const [spinnerFrame, setSpinnerFrame] = useState(0);
+
+  useEffect(() => {
+    if (!loading) return;
+    const id = setInterval(
+      () => setSpinnerFrame((f) => (f + 1) % SPINNER_FRAMES.length),
+      80,
+    );
+    return () => clearInterval(id);
+  }, [loading]);
+
   const [searchMode, setSearchMode] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   // Local selection index — always relative to filteredRows
@@ -121,8 +197,6 @@ export function ResourceTable({
     windowStart,
     windowStart + visibleCount,
   );
-  const hasAbove = windowStart > 0;
-  const hasBelow = windowStart + visibleCount < filteredRows.length;
 
   function moveUp() {
     const next = Math.max(0, safeLocal - 1);
@@ -236,6 +310,13 @@ export function ResourceTable({
               {"  "}☑ {selectedUids.size} selected [enter] view logs
             </Text>
           )}
+          {filteredRows.length > visibleCount && (
+            <ProgressBar
+              start={windowStart}
+              visible={visibleCount}
+              total={filteredRows.length}
+            />
+          )}
         </Box>
       </Box>
 
@@ -250,30 +331,31 @@ export function ResourceTable({
       >
         <Text bold color="cyan">
           {"   "}
-          {padEnd("NAME", COL_NAME)}
-          {padEnd("NAMESPACE", COL_NS)}
+          {padEnd("NAME", colName)}
+          {padEnd("NAMESPACE", colNs)}
           {"STATUS      "}
           {padEnd("AGE", COL_AGE)}
-          {padEnd("DETAILS", COL_EXTRA)}
-          {"INFO"}
+          {padEnd(extraLabel, colExtra)}
+          {padEnd(extra2Label, colExtra2)}
+          {showExtra3 ? padEnd(extra3Label, colExtra3) : ""}
         </Text>
       </Box>
 
-      {/* Empty state */}
+      {/* Loading / empty state */}
       {filteredRows.length === 0 && (
         <Box marginTop={1} paddingX={2}>
-          <Text dimColor>
-            {searchQuery
-              ? `No matches for "${searchQuery}"`
-              : "No resources found"}
-          </Text>
-        </Box>
-      )}
-
-      {/* Scroll indicator — above */}
-      {hasAbove && (
-        <Box paddingX={2}>
-          <Text dimColor>↑ {windowStart} more above</Text>
+          {loading ? (
+            <Text dimColor>
+              {SPINNER_FRAMES[spinnerFrame]} Loading{" "}
+              {resourceLabel ?? "resources"}...
+            </Text>
+          ) : (
+            <Text dimColor>
+              {searchQuery
+                ? `No results for "/${searchQuery}"`
+                : `No ${resourceLabel ?? "resources"} found`}
+            </Text>
+          )}
         </Box>
       )}
 
@@ -307,20 +389,26 @@ export function ResourceTable({
               <Text
                 inverse={isSelected}
                 bold={isSelected}
-                color={isSelected ? "cyan" : undefined}
+                color={
+                  isSelected
+                    ? "cyan"
+                    : row.status === HealthStatus.Critical
+                      ? "red"
+                      : undefined
+                }
               >
                 <HighlightText
-                  text={padEnd(row.name, COL_NAME)}
+                  text={padEnd(row.name, colName)}
                   query={searchQuery}
                 />
               </Text>
               <Text
                 inverse={isSelected}
-                color={isSelected ? "cyan" : "gray"}
+                color={isSelected ? "cyan" : undefined}
                 dimColor={!isSelected}
               >
                 <HighlightText
-                  text={padEnd(row.namespace, COL_NS)}
+                  text={padEnd(row.namespace, colNs)}
                   query={searchQuery}
                 />
               </Text>
@@ -338,7 +426,7 @@ export function ResourceTable({
             {/* Age */}
             <Text
               inverse={isSelected}
-              color={isSelected ? "cyan" : "gray"}
+              color={isSelected ? "cyan" : undefined}
               dimColor={!isSelected}
             >
               {padEnd(formatAge(row.creationTimestamp), COL_AGE)}
@@ -348,25 +436,27 @@ export function ResourceTable({
             {(row.extra || row.extra2) && (
               <Text
                 inverse={isSelected}
-                color={isSelected ? "cyan" : "gray"}
+                color={isSelected ? "cyan" : undefined}
                 dimColor={!isSelected}
               >
-                {padEnd(row.extra ?? "", COL_EXTRA)}
-                {row.extra2 ?? ""}
+                {padEnd(row.extra ?? "", colExtra)}
+                {padEnd(row.extra2 ?? "", colExtra2)}
+              </Text>
+            )}
+
+            {/* Extra3 — only on wide terminals */}
+            {showExtra3 && (
+              <Text
+                inverse={isSelected}
+                color={isSelected ? "cyan" : undefined}
+                dimColor={!isSelected}
+              >
+                {padEnd(row.extra3 ?? "", colExtra3)}
               </Text>
             )}
           </Box>
         );
       })}
-
-      {/* Scroll indicator — below */}
-      {hasBelow && (
-        <Box paddingX={2}>
-          <Text dimColor>
-            ↓ {filteredRows.length - windowStart - visibleCount} more below
-          </Text>
-        </Box>
-      )}
 
       {/* Footer hints */}
       <Box
