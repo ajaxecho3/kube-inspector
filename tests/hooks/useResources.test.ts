@@ -83,4 +83,44 @@ describe("useResources", () => {
 
     expect(result.current.resources.size).toBe(0);
   });
+
+  it("starts with loading=true", () => {
+    const kc = {} as any;
+    const { result } = renderHook(() =>
+      useResources(kc, "/api/v1/pods", { namespaced: true }),
+    );
+    expect(result.current.loading).toBe(true);
+  });
+
+  it("loading becomes false after first event", async () => {
+    const kc = {} as any;
+    mockWatch.mockImplementation(
+      (_path: string, _params: any, callback: Function) => {
+        callback("ADDED", { metadata: { uid: "uid-1", name: "pod-1" } });
+        return Promise.resolve({ abort: mockAbort });
+      },
+    );
+    const { result } = renderHook(() =>
+      useResources(kc, "/api/v1/pods", { namespaced: true }),
+    );
+    await waitFor(() => {
+      expect(result.current.loading).toBe(false);
+    });
+  });
+
+  it("loading becomes false on error", async () => {
+    const kc = {} as any;
+    mockWatch.mockImplementation(
+      (_path: string, _params: any, _callback: Function, done: Function) => {
+        done(new Error("connection refused"));
+        return Promise.resolve({ abort: mockAbort });
+      },
+    );
+    const { result } = renderHook(() =>
+      useResources(kc, "/api/v1/pods", { namespaced: true }),
+    );
+    await waitFor(() => {
+      expect(result.current.loading).toBe(false);
+    });
+  });
 });
