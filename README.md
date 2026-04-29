@@ -6,10 +6,15 @@ A Node.js TUI for inspecting and monitoring Kubernetes clusters in real-time.
 
 - Live watch of Pods, Deployments, Services, Namespaces, Nodes, and Events
 - Color-coded health status (🟢 green / 🟡 yellow / 🔴 red)
-- Pop-up alerts on critical resource state transitions (auto-dismiss 5s)
-- Pod detail view with live log streaming
-- Context switching without leaving the terminal
+- Per-tab resource counts and critical indicators in the tab bar
+- Status summary bar showing total / critical / degraded / healthy counts
+- Pop-up alerts on critical resource state transitions (auto-dismiss 5s, queue counter for multiple)
+- Pod detail view with live log streaming and multi-pod log comparison
+- Context switching with `/` search filter without leaving the terminal
 - Safe opt-in mutation support with mandatory confirmation and audit log
+- Adaptive column widths that scale with terminal size
+- Loading spinner and scroll progress indicator
+- Context-aware footer hints that change based on active view
 
 ## Requirements
 
@@ -38,8 +43,10 @@ npm start -- --enable-mutations --max-replicas=10
 | `Tab`          | Switch to next resource tab          |
 | `↑` / `↓`      | Navigate rows                        |
 | `Enter`        | Open detail view (pod logs for pods) |
+| `Space`        | Select pod (for multi-pod log view)  |
+| `/`            | Search / filter rows                 |
 | `c`            | Switch kubeconfig context            |
-| `Esc`          | Dismiss alert / close detail view    |
+| `Esc`          | Dismiss alert / close detail / clear search |
 | `q` / `Ctrl+C` | Quit                                 |
 
 ### Mutations (requires `--enable-mutations`)
@@ -63,7 +70,7 @@ All mutations require explicit `y` confirmation. No action is ever triggered aut
 ## Development
 
 ```bash
-npm test           # Run all tests (34 tests, 9 files)
+npm test           # Run all tests (43 tests, 9 files)
 npm run test:watch # Watch mode
 npm run build      # Compile TypeScript to dist/
 ```
@@ -80,13 +87,15 @@ src/
 │   ├── useLogStream.ts    # Streams pod logs into a ring buffer (last 500 lines)
 │   └── useAlerts.ts       # Derives alerts from critical state transitions
 ├── components/
-│   ├── ResourceTable.tsx  # Scrollable, keyboard-navigable resource table
+│   ├── ResourceTable.tsx  # Scrollable table with search, adaptive columns, spinner, progress bar
 │   ├── StatusBadge.tsx    # Color-coded ● health indicator
-│   ├── NavTabs.tsx        # Tab bar: Pods | Deployments | Services | Namespaces | Nodes | Events
-│   ├── AlertBanner.tsx    # Slide-in critical alert, auto-dismisses after 5s
+│   ├── NavTabs.tsx        # Tab bar with resource count badges and critical indicators
+│   ├── AlertBanner.tsx    # Critical alert banner with queue counter, auto-dismisses after 5s
 │   ├── ConfirmModal.tsx   # Mutation confirmation overlay — never self-triggers
-│   ├── ContextSwitcher.tsx# Kubeconfig context switcher overlay
-│   └── PodDetail.tsx      # Pod detail: container statuses + live logs
+│   ├── ContextSwitcher.tsx# Kubeconfig context switcher with / search filter
+│   ├── PodDetail.tsx      # Pod detail: container statuses + live logs
+│   ├── SplitLogView.tsx   # Side-by-side log comparison for two pods
+│   └── MultiPodLogView.tsx# Multi-pod log view for 2+ selected pods
 └── utils/
     ├── health.ts          # Pure functions: classify resource health
     ├── format.ts          # Pure functions: format age/durations
