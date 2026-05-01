@@ -6,6 +6,17 @@ import { stripVTControlCharacters } from "node:util";
 const RING_BUFFER_SIZE = 500;
 const RECONNECT_DELAY_MS = 2000;
 
+export interface UseLogStreamOptions {
+  /** How many historical lines to fetch on connect (default: 100) */
+  tailLines?: number;
+  /** Request RFC3339 timestamp prefix on every line (default: true) */
+  timestamps?: boolean;
+  /** Stream the previously-terminated container instance (default: false) */
+  previous?: boolean;
+  /** Only return logs newer than this many seconds ago (default: undefined = all) */
+  sinceSeconds?: number;
+}
+
 export interface UseLogStreamResult {
   lines: string[];
   error: string | null;
@@ -16,18 +27,24 @@ export function useLogStream(
   namespace: string,
   podName: string,
   containerName: string,
+  options: UseLogStreamOptions = {},
 ): UseLogStreamResult {
   const [lines, setLines] = useState<string[]>([]);
   const [error, setError] = useState<string | null>(null);
 
+  // Destructure so primitives go into the dep array (avoids object-identity issues)
+  const {
+    tailLines = 100,
+    timestamps = true,
+    previous = false,
+    sinceSeconds,
+  } = options;
+
   useEffect(() => {
-    // Local closure flag — each effect run owns its own `active` variable,
-    // so stale async callbacks from a previous run can never write to state.
     let active = true;
     let abortRequest: (() => void) | null = null;
     let retryTimer: ReturnType<typeof setTimeout> | null = null;
 
-    // Reset lines when the target (pod/container) changes
     setLines([]);
     setError(null);
 
@@ -54,10 +71,13 @@ export function useLogStream(
         }
       });
 
-      // Stream ended naturally (server closed the follow connection) — reconnect
       logStream.on("end", () => {
         if (!active) return;
-        retryTimer = setTimeout(startStream, RECONNECT_DELAY_MS);
+        // Previous-container logs are finite — don't reconnect, we have all of them.
+        // Live logs: reconnect when the server closes the follow connection.
+        if (!previous) {
+          retryTimer = setTimeout(startStream, RECONNECT_DELAY_MS);
+        }
       });
 
       logStream.on("error", (err) => {
@@ -73,12 +93,14 @@ export function useLogStream(
           containerName,
           logStream,
           {
-            follow: true,
-            tailLines: 100,
+            follow: !previous, // can't follow previous-container logs
+            tailLines,
+            timestamps,
+            previous,
+            ...(sinceSeconds !== undefined ? { sinceSeconds } : {}),
           },
         );
         if (!active) {
-          // Effect was cleaned up while we awaited — abort immediately
           (req as any).destroy?.();
           return;
         }
@@ -98,7 +120,7 @@ export function useLogStream(
       if (retryTimer !== null) clearTimeout(retryTimer);
       abortRequest?.();
     };
-  }, [kubeConfig, namespace, podName, containerName]);
+  }, [kubeConfig, namespace, podName, containerName, tailLines, timestamps, previous, sinceSeconds]);
 
   return { lines, error };
 }

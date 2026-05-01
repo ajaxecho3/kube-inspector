@@ -2,6 +2,12 @@ import React from "react";
 import { Box, Text } from "ink";
 import type { V1Pod, KubeConfig } from "@kubernetes/client-node";
 import { useLogStream } from "../hooks/useLogStream.js";
+import {
+  type LogLevel,
+  filterByLevel,
+  detectLineLevel,
+  levelColor,
+} from "../utils/logLevel.js";
 
 const TAIL_LINES = 20;
 
@@ -12,6 +18,7 @@ interface ContainerTailPaneProps {
   containerName: string;
   isReady: boolean;
   restarts: number;
+  logLevel: LogLevel;
 }
 
 function ContainerTailPane({
@@ -21,6 +28,7 @@ function ContainerTailPane({
   containerName,
   isReady,
   restarts,
+  logLevel,
 }: ContainerTailPaneProps) {
   const { lines, error } = useLogStream(
     kubeConfig,
@@ -28,7 +36,8 @@ function ContainerTailPane({
     podName,
     containerName,
   );
-  const tail = lines.slice(-TAIL_LINES);
+  const filtered = filterByLevel(lines, logLevel);
+  const tail = filtered.slice(-TAIL_LINES);
 
   return (
     <Box
@@ -40,7 +49,14 @@ function ContainerTailPane({
     >
       {/* Pane header */}
       <Box paddingX={1} justifyContent="space-between">
-        <Text bold>{containerName}</Text>
+        <Box>
+          <Text bold>{containerName}</Text>
+          {logLevel !== "ALL" && (
+            <Text color={levelColor(logLevel as Exclude<LogLevel, "ALL">)} bold>
+              {" "}[{logLevel}]
+            </Text>
+          )}
+        </Box>
         <Box>
           <Text color={isReady ? "green" : "red"}>
             {isReady ? "● Ready" : "● NotReady"}
@@ -52,17 +68,26 @@ function ContainerTailPane({
       {/* Log tail */}
       <Box flexDirection="column" paddingX={1} flexGrow={1}>
         {error && <Text color="red">{error}</Text>}
-        {lines.length === 0 && !error && (
-          <Text dimColor>Waiting for logs...</Text>
+        {filtered.length === 0 && !error && (
+          <Text dimColor>
+            {logLevel !== "ALL"
+              ? `No ${logLevel} lines yet…`
+              : "Waiting for logs..."}
+          </Text>
         )}
-        {tail.map((line, i) => (
-          <Text key={lines.length - tail.length + i}>{line}</Text>
-        ))}
+        {tail.map((line, i) => {
+          const color = levelColor(detectLineLevel(line));
+          return (
+            <Text key={filtered.length - tail.length + i} color={color} dimColor={!color} wrap="truncate">
+              {line}
+            </Text>
+          );
+        })}
       </Box>
 
       {/* Footer */}
       <Box paddingX={1}>
-        <Text dimColor>● auto-follow {lines.length} lines</Text>
+        <Text dimColor>● auto-follow {filtered.length} lines</Text>
       </Box>
     </Box>
   );
@@ -71,9 +96,10 @@ function ContainerTailPane({
 export interface SplitLogViewProps {
   pod: V1Pod;
   kubeConfig: KubeConfig;
+  logLevel: LogLevel;
 }
 
-export function SplitLogView({ pod, kubeConfig }: SplitLogViewProps) {
+export function SplitLogView({ pod, kubeConfig, logLevel }: SplitLogViewProps) {
   const namespace = pod.metadata?.namespace ?? "default";
   const podName = pod.metadata?.name ?? "";
   const containers = pod.spec?.containers ?? [];
@@ -93,6 +119,7 @@ export function SplitLogView({ pod, kubeConfig }: SplitLogViewProps) {
             containerName={c.name}
             isReady={cs?.ready ?? false}
             restarts={cs?.restartCount ?? 0}
+            logLevel={logLevel}
           />
         );
       })}

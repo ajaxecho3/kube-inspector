@@ -4,6 +4,38 @@ import type { V1Pod, KubeConfig } from "@kubernetes/client-node";
 import { useLogStream } from "../hooks/useLogStream.js";
 import { formatAge } from "../utils/format.js";
 import { SplitLogView } from "./SplitLogView.js";
+import {
+  type LogLevel,
+  LEVEL_KEYWORDS,
+  detectLineLevel,
+  levelColor,
+  nextLevel,
+} from "../utils/logLevel.js";
+
+// ── Constants ────────────────────────────────────────────────────────────────
+
+/** Cycling options for tail size (lines fetched on connect) */
+const TAIL_OPTIONS = [50, 100, 200, 500] as const;
+
+/** Cycling options for since-filter in minutes (undefined = all) */
+const SINCE_OPTIONS = [undefined, 5, 15, 60] as const;
+
+/** Strip RFC3339 timestamp prefix added by the k8s API (timestamps:true) */
+const TS_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z /;
+function stripTs(line: string): string {
+  return line.replace(TS_RE, "");
+}
+
+// ── Types ────────────────────────────────────────────────────────────────────
+
+interface DisplayLine {
+  /** Text shown on screen — includes timestamp when showTimestamps:true */
+  display: string;
+  /** Timestamp-stripped content used for filtering and level detection */
+  content: string;
+}
+
+// ── Component ────────────────────────────────────────────────────────────────
 
 interface PodDetailProps {
   pod: V1Pod;
@@ -14,61 +46,110 @@ interface PodDetailProps {
 export function PodDetail({ pod, kubeConfig, onClose }: PodDetailProps) {
   const { stdout } = useStdout();
   const namespace = pod.metadata?.namespace ?? "default";
-  const podName = pod.metadata?.name ?? "";
+  const podName   = pod.metadata?.name ?? "";
   const containers = pod.spec?.containers ?? [];
+
+  // ── View state ─────────────────────────────────────────────────────────────
   const [activeContainer, setActiveContainer] = useState(0);
-  const [scrollOffset, setScrollOffset] = useState(0);
-  const [follow, setFollow] = useState(true);
-  const [logSearch, setLogSearch] = useState("");
-  const [logSearchMode, setLogSearchMode] = useState(false);
-  const [splitMode, setSplitMode] = useState(false);
+  const [scrollOffset,    setScrollOffset]    = useState(0);
+  const [follow,          setFollow]          = useState(true);
+  const [splitMode,       setSplitMode]       = useState(false);
+
+  // ── Log filter / display state ─────────────────────────────────────────────
+  const [logLevel,       setLogLevel]       = useState<LogLevel>("ALL");
+  const [logSearch,      setLogSearch]      = useState("");
+  const [logSearchMode,  setLogSearchMode]  = useState(false);
+  const [regexMode,      setRegexMode]      = useState(false);
+  const [showTimestamps, setShowTimestamps] = useState(false);
+  const [wrapLines,      setWrapLines]      = useState(false);
+
+  // ── Stream options ─────────────────────────────────────────────────────────
+  const [tailIdx,      setTailIdx]      = useState(1);       // index into TAIL_OPTIONS
+  const [sinceIdx,     setSinceIdx]     = useState(0);       // index into SINCE_OPTIONS
+  const [showPrevious, setShowPrevious] = useState(false);
+
+  const tailLines   = TAIL_OPTIONS[tailIdx];
+  const sinceOption = SINCE_OPTIONS[sinceIdx];
+  const sinceSeconds = sinceOption !== undefined ? sinceOption * 60 : undefined;
 
   const containerName = containers[activeContainer]?.name ?? "";
 
-  // Chrome: title(1) + meta(1) + labels(1) + container rows(capped 4) + log header(1) + log footer(1) + 5 borders
-  const CHROME = 10 + Math.min(containers.length, 4);
+  // Chrome: title(1) + meta(1) + labels(1) + containers(capped 4) + log-header(1)
+  //       + hint-row-1(1) + hint-row-2(1) + round-border(2) + 2 inner borders(2) = 14 + containers
+  const CHROME   = 14 + Math.min(containers.length, 4);
   const logLines = Math.max(5, (stdout?.rows ?? 30) - CHROME);
 
+  // ── Log stream ─────────────────────────────────────────────────────────────
   const { lines, error: logError } = useLogStream(
     kubeConfig,
     namespace,
     podName,
     containerName,
+    { tailLines, timestamps: true, previous: showPrevious, sinceSeconds },
   );
 
-  const displayLines = useMemo(() => {
-    if (!logSearch) return lines;
-    return lines.filter((l) =>
-      l.toLowerCase().includes(logSearch.toLowerCase()),
-    );
-  }, [lines, logSearch]);
+  // ── Derived display lines ──────────────────────────────────────────────────
+  const displayLines = useMemo((): DisplayLine[] => {
+    let items: DisplayLine[] = lines.map((raw) => ({
+      display: showTimestamps ? raw : stripTs(raw),
+      content: stripTs(raw),
+    }));
 
-  const maxOffset = Math.max(0, displayLines.length - logLines);
+    // Level filter
+    if (logLevel !== "ALL") {
+      const kws = LEVEL_KEYWORDS[logLevel];
+      items = items.filter(({ content }) =>
+        kws.some((kw) => content.toLowerCase().includes(kw)),
+      );
+    }
+
+    // Search filter
+    if (logSearch) {
+      if (regexMode) {
+        try {
+          const re = new RegExp(logSearch, "i");
+          items = items.filter(({ content }) => re.test(content));
+        } catch {
+          items = [];
+        }
+      } else {
+        const q = logSearch.toLowerCase();
+        items = items.filter(({ content }) => content.toLowerCase().includes(q));
+      }
+    }
+
+    return items;
+  }, [lines, logLevel, logSearch, regexMode, showTimestamps]);
+
+  const maxOffset      = Math.max(0, displayLines.length - logLines);
   const effectiveOffset = follow
     ? maxOffset
     : Math.min(scrollOffset, maxOffset);
-  const visibleLines = displayLines.slice(
-    effectiveOffset,
-    effectiveOffset + logLines,
-  );
+  const visibleLines   = displayLines.slice(effectiveOffset, effectiveOffset + logLines);
 
+  const scrollPercent =
+    displayLines.length <= logLines
+      ? 100
+      : Math.round((effectiveOffset / maxOffset) * 100);
+
+  // ── Key input ──────────────────────────────────────────────────────────────
   useInput((input, key) => {
+    // Search mode captures all keys
     if (logSearchMode) {
       if (key.escape) {
         setLogSearchMode(false);
         setLogSearch("");
       } else if (key.return) {
         setLogSearchMode(false);
-      } else if (key.backspace || key.delete)
+      } else if (key.backspace || key.delete) {
         setLogSearch((q) => q.slice(0, -1));
-      else if (input && !key.ctrl && !key.meta) setLogSearch((q) => q + input);
+      } else if (input && !key.ctrl && !key.meta) {
+        setLogSearch((q) => q + input);
+      }
       return;
     }
 
-    if (key.escape) {
-      onClose();
-      return;
-    }
+    if (key.escape) { onClose(); return; }
 
     if (input === "m" && containers.length > 1) {
       setSplitMode((v) => !v);
@@ -87,6 +168,7 @@ export function PodDetail({ pod, kubeConfig, onClose }: PodDetailProps) {
     }
 
     if (!splitMode) {
+      // Scroll
       if (key.upArrow) {
         setFollow(false);
         setScrollOffset((o) => Math.max(0, o - 1));
@@ -96,50 +178,135 @@ export function PodDetail({ pod, kubeConfig, onClose }: PodDetailProps) {
         setScrollOffset(next);
         if (next >= maxOffset) setFollow(true);
       }
-      if (input === "g") {
+      if (input === "g") { setScrollOffset(0);        setFollow(false); }
+      if (input === "G") { setScrollOffset(maxOffset); setFollow(true);  }
+      if (input === "f") setFollow((v) => !v);
+
+      // Search
+      if (input === "/") { setLogSearchMode(true); setLogSearch(""); }
+      if (input === "r") setRegexMode((v) => !v);
+
+      // Display toggles
+      if (input === "l") {
+        setLogLevel((cur) => nextLevel(cur));
         setScrollOffset(0);
-        setFollow(false);
-      }
-      if (input === "G") {
-        setScrollOffset(maxOffset);
         setFollow(true);
       }
-      if (input === "f") setFollow((v) => !v);
-      if (input === "/") {
-        setLogSearchMode(true);
-        setLogSearch("");
+      if (input === "t") setShowTimestamps((v) => !v);
+      if (input === "w") setWrapLines((v) => !v);
+
+      // Stream options (restart stream)
+      if (input === "+" || input === "=") {
+        setTailIdx((i) => Math.min(TAIL_OPTIONS.length - 1, i + 1));
+        setScrollOffset(0);
+        setFollow(true);
+      }
+      if (input === "-") {
+        setTailIdx((i) => Math.max(0, i - 1));
+        setScrollOffset(0);
+        setFollow(true);
+      }
+      if (input === "s") {
+        setSinceIdx((i) => (i + 1) % SINCE_OPTIONS.length);
+        setScrollOffset(0);
+        setFollow(true);
+      }
+      if (input === "p") {
+        setShowPrevious((v) => {
+          // Switching to previous: force follow off (prev logs are finite)
+          if (!v) setFollow(false);
+          else    setFollow(true);
+          return !v;
+        });
+        setScrollOffset(0);
       }
     }
   });
 
-  // Derived pod info
-  const phase = pod.status?.phase ?? "Unknown";
-  const phaseColor =
-    phase === "Running" ? "green" : phase === "Pending" ? "yellow" : "red";
-  const podIP = pod.status?.podIP ?? "-";
-  const nodeName = pod.spec?.nodeName ?? "-";
-  const labels = pod.metadata?.labels ?? {};
-  const labelStr = Object.entries(labels)
-    .map(([k, v]) => `${k}=${v}`)
-    .join("  ");
-  const scrollPercent =
-    displayLines.length <= logLines
-      ? 100
-      : Math.round((effectiveOffset / maxOffset) * 100);
+  // ── Derived pod metadata ───────────────────────────────────────────────────
+  const phase      = pod.status?.phase ?? "Unknown";
+  const phaseColor = phase === "Running" ? "green" : phase === "Pending" ? "yellow" : "red";
+  const podIP      = pod.status?.podIP   ?? "-";
+  const nodeName   = pod.spec?.nodeName  ?? "-";
+  const labels     = pod.metadata?.labels ?? {};
+  const labelStr   = Object.entries(labels).map(([k, v]) => `${k}=${v}`).join("  ");
 
+  // ── Render helpers ─────────────────────────────────────────────────────────
+
+  /** Highlight a single display line for search matches */
+  function renderLine(dl: DisplayLine, idx: number) {
+    const { display, content } = dl;
+    const color    = levelColor(detectLineLevel(content));
+    const wrapProp = wrapLines ? "wrap" : "truncate";
+
+    if (!logSearch) {
+      return (
+        <Text key={idx} color={color} dimColor={!color} wrap={wrapProp}>
+          {display}
+        </Text>
+      );
+    }
+
+    // Regex highlight
+    if (regexMode) {
+      try {
+        const re  = new RegExp(`(${logSearch})`, "gi");
+        const parts = display.split(re);
+        return (
+          <Text key={idx} color={color} dimColor={!color} wrap={wrapProp}>
+            {parts.map((part, pi) =>
+              re.test(part) ? (
+                <Text key={pi} backgroundColor="yellow" color="black">{part}</Text>
+              ) : (
+                part
+              ),
+            )}
+          </Text>
+        );
+      } catch {
+        return <Text key={idx} color={color} dimColor={!color} wrap={wrapProp}>{display}</Text>;
+      }
+    }
+
+    // Plain-string highlight
+    const q   = logSearch.toLowerCase();
+    const pos = display.toLowerCase().indexOf(q);
+    if (pos === -1) {
+      return <Text key={idx} color={color} dimColor={!color} wrap={wrapProp}>{display}</Text>;
+    }
+    return (
+      <Text key={idx} color={color} dimColor={!color} wrap={wrapProp}>
+        {display.slice(0, pos)}
+        <Text backgroundColor="yellow" color="black">
+          {display.slice(pos, pos + logSearch.length)}
+        </Text>
+        {display.slice(pos + logSearch.length)}
+      </Text>
+    );
+  }
+
+  // ── Status badges shown in log header ──────────────────────────────────────
+  const badges: React.ReactNode[] = [];
+  if (logLevel !== "ALL")
+    badges.push(<Text key="lvl" color={levelColor(logLevel as Exclude<LogLevel,"ALL">)} bold> [{logLevel}]</Text>);
+  if (showPrevious)
+    badges.push(<Text key="prev" color="magenta" bold> [PREV]</Text>);
+  if (sinceOption !== undefined)
+    badges.push(<Text key="since" color="cyan" dimColor> [{sinceOption}m]</Text>);
+  if (showTimestamps)
+    badges.push(<Text key="ts" color="cyan" dimColor> [TS]</Text>);
+  if (wrapLines)
+    badges.push(<Text key="wrap" color="cyan" dimColor> [WRAP]</Text>);
+  if (regexMode)
+    badges.push(<Text key="re" color="yellow" dimColor> [RE]</Text>);
+
+  // ── JSX ───────────────────────────────────────────────────────────────────
   return (
-    <Box
-      flexDirection="column"
-      borderStyle="round"
-      borderColor="cyan"
-      flexGrow={1}
-    >
+    <Box flexDirection="column" borderStyle="round" borderColor="cyan" flexGrow={1}>
       {/* Title bar */}
       <Box justifyContent="space-between" paddingX={1}>
         <Box>
-          <Text bold color="cyan">
-            Pod:{" "}
-          </Text>
+          <Text bold color="cyan">Pod: </Text>
           <Text bold>{podName}</Text>
           <Text dimColor> ns: {namespace}</Text>
         </Box>
@@ -152,22 +319,11 @@ export function PodDetail({ pod, kubeConfig, onClose }: PodDetailProps) {
       </Box>
 
       {/* Metadata row */}
-      <Box
-        paddingX={1}
-        borderStyle="single"
-        borderTop={false}
-        borderLeft={false}
-        borderRight={false}
-        borderBottom={true}
-      >
+      <Box paddingX={1} borderStyle="single" borderTop={false} borderLeft={false} borderRight={false} borderBottom={true}>
         <Text color={phaseColor}>● {phase} </Text>
-        <Text dimColor>IP: </Text>
-        <Text>{podIP} </Text>
+        <Text dimColor>IP: </Text><Text>{podIP} </Text>
         <Text dimColor>Node: </Text>
-        <Text>
-          {nodeName.length > 24 ? nodeName.slice(0, 23) + "…" : nodeName}
-          {"  "}
-        </Text>
+        <Text>{nodeName.length > 24 ? nodeName.slice(0, 23) + "…" : nodeName}{"  "}</Text>
         <Text dimColor>Age: {formatAge(pod.metadata?.creationTimestamp)}</Text>
       </Box>
 
@@ -175,53 +331,29 @@ export function PodDetail({ pod, kubeConfig, onClose }: PodDetailProps) {
       {labelStr ? (
         <Box paddingX={1}>
           <Text dimColor>Labels: </Text>
-          <Text>
-            {labelStr.length > 100 ? labelStr.slice(0, 99) + "…" : labelStr}
-          </Text>
+          <Text>{labelStr.length > 100 ? labelStr.slice(0, 99) + "…" : labelStr}</Text>
         </Box>
       ) : null}
 
       {/* Containers summary */}
-      <Box
-        flexDirection="column"
-        paddingX={1}
-        borderStyle="single"
-        borderTop={false}
-        borderLeft={false}
-        borderRight={false}
-        borderBottom={true}
-      >
+      <Box flexDirection="column" paddingX={1} borderStyle="single" borderTop={false} borderLeft={false} borderRight={false} borderBottom={true}>
         {containers.slice(0, 4).map((c, i) => {
-          const cs = pod.status?.containerStatuses?.find(
-            (s) => s.name === c.name,
-          );
+          const cs       = pod.status?.containerStatuses?.find((s) => s.name === c.name);
           const isActive = i === activeContainer && !splitMode;
-          const image = c.image ?? "";
-          const shortImage = (image.split("/").pop() ?? image).slice(0, 26);
-          const cpuR = c.resources?.requests?.["cpu"] ?? "-";
-          const memR = c.resources?.requests?.["memory"] ?? "-";
-          const cpuL = c.resources?.limits?.["cpu"] ?? "-";
-          const memL = c.resources?.limits?.["memory"] ?? "-";
+          const image    = c.image ?? "";
+          const shortImg = (image.split("/").pop() ?? image).slice(0, 26);
+          const cpuR     = c.resources?.requests?.["cpu"]    ?? "-";
+          const memR     = c.resources?.requests?.["memory"] ?? "-";
+          const cpuL     = c.resources?.limits?.["cpu"]      ?? "-";
+          const memL     = c.resources?.limits?.["memory"]   ?? "-";
           const restarts = cs?.restartCount ?? 0;
-
           return (
             <Box key={c.name}>
-              <Text color={isActive ? "cyan" : "gray"}>
-                {isActive ? "▶ " : "  "}
-              </Text>
-              <Text bold={isActive} color={isActive ? "cyan" : undefined}>
-                {c.name}
-              </Text>
-              <Text dimColor> {shortImage}</Text>
-              <Text color={cs?.ready ? "green" : "red"}>
-                {cs?.ready ? "  ● Ready" : "  ● NotReady"}
-              </Text>
-              <Text dimColor>
-                {"  cpu "}
-                {cpuR}/{cpuL}
-                {"  mem "}
-                {memR}/{memL}
-              </Text>
+              <Text color={isActive ? "cyan" : "gray"}>{isActive ? "▶ " : "  "}</Text>
+              <Text bold={isActive} color={isActive ? "cyan" : undefined}>{c.name}</Text>
+              <Text dimColor> {shortImg}</Text>
+              <Text color={cs?.ready ? "green" : "red"}>{cs?.ready ? "  ● Ready" : "  ● NotReady"}</Text>
+              <Text dimColor>{"  cpu "}{cpuR}/{cpuL}{"  mem "}{memR}/{memL}</Text>
               {restarts > 0 && <Text color="yellow"> ↺{restarts}</Text>}
             </Box>
           );
@@ -231,14 +363,12 @@ export function PodDetail({ pod, kubeConfig, onClose }: PodDetailProps) {
         )}
       </Box>
 
-      {/* Log area — split or single */}
+      {/* Log area */}
       {splitMode ? (
         <>
-          <SplitLogView pod={pod} kubeConfig={kubeConfig} />
+          <SplitLogView pod={pod} kubeConfig={kubeConfig} logLevel={logLevel} />
           <Box paddingX={1}>
-            <Text dimColor>
-              [m] single mode [Esc] close — all containers auto-follow
-            </Text>
+            <Text dimColor>[m] single mode  [Esc] close — all containers auto-follow</Text>
           </Box>
         </>
       ) : (
@@ -247,35 +377,36 @@ export function PodDetail({ pod, kubeConfig, onClose }: PodDetailProps) {
           <Box paddingX={1} justifyContent="space-between">
             {logSearchMode ? (
               <Box>
-                <Text color="cyan" bold>
-                  /{" "}
-                </Text>
+                {regexMode && <Text color="yellow" bold>re</Text>}
+                <Text color="cyan" bold>/ </Text>
                 <Text>{logSearch}</Text>
                 <Text color="cyan">█</Text>
               </Box>
             ) : logSearch ? (
               <Box>
-                <Text color="yellow">/ {logSearch}</Text>
-                <Text dimColor> {displayLines.length} match esc clear</Text>
+                <Text color="yellow">{regexMode ? "re/" : "/"}{logSearch}</Text>
+                <Text dimColor> {displayLines.length} match  esc clear</Text>
               </Box>
             ) : (
-              <Text dimColor bold>
-                Logs ({containerName})
-              </Text>
+              <Box>
+                <Text dimColor bold>Logs ({containerName})</Text>
+                {badges}
+              </Box>
             )}
             <Box>
-              {follow ? (
+              {showPrevious ? (
+                <Text color="magenta">◀ previous</Text>
+              ) : follow ? (
                 <Text color="green">● follow</Text>
               ) : (
                 <Text color="yellow">⏸ paused</Text>
               )}
               <Text dimColor>
-                {"  "}
-                {effectiveOffset + 1}-
+                {"  "}{effectiveOffset + 1}-
                 {Math.min(effectiveOffset + logLines, displayLines.length)}/
                 {displayLines.length}
-                {"  "}
-                {scrollPercent}%
+                {"  "}{scrollPercent}%
+                {"  tail:"}{tailLines}
               </Text>
             </Box>
           </Box>
@@ -296,34 +427,22 @@ export function PodDetail({ pod, kubeConfig, onClose }: PodDetailProps) {
               <Text dimColor>
                 {logSearch
                   ? `No matches for "${logSearch}"`
+                  : showPrevious
+                  ? "No previous logs found"
                   : "Waiting for logs..."}
               </Text>
             )}
-            {visibleLines.map((line, i) => {
-              if (logSearch) {
-                const idx = line.toLowerCase().indexOf(logSearch.toLowerCase());
-                if (idx !== -1) {
-                  return (
-                    <Text key={effectiveOffset + i}>
-                      {line.slice(0, idx)}
-                      <Text backgroundColor="yellow" color="black">
-                        {line.slice(idx, idx + logSearch.length)}
-                      </Text>
-                      {line.slice(idx + logSearch.length)}
-                    </Text>
-                  );
-                }
-              }
-              return <Text key={effectiveOffset + i}>{line}</Text>;
-            })}
+            {visibleLines.map((dl, i) => renderLine(dl, effectiveOffset + i))}
           </Box>
 
-          {/* Log footer */}
-          <Box paddingX={1}>
+          {/* Hint footer — two compact rows */}
+          <Box flexDirection="column" paddingX={1}>
             <Text dimColor>
-              [↑↓] Scroll [g] Top [G] Bottom [f] Follow [/] Search
-              {containers.length > 1 ? "  [[] []] Container" : ""}
-              {"  [Esc] Close"}
+              [↑↓][g/G] Scroll  [f] Follow  [/] Search  [r] Regex({regexMode ? "ON" : "off"})  [l] Level({logLevel})  [Esc] Close
+            </Text>
+            <Text dimColor>
+              [t] Timestamps({showTimestamps ? "ON" : "off"})  [w] Wrap({wrapLines ? "ON" : "off"})  [s] Since({sinceOption !== undefined ? `${sinceOption}m` : "all"})  [p] Prev({showPrevious ? "ON" : "off"})  [+/-] Tail({tailLines})
+              {containers.length > 1 ? "  [[] []] Ctr" : ""}
             </Text>
           </Box>
         </Box>
