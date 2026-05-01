@@ -1,19 +1,29 @@
 import React, { useState } from "react";
-import { Box, Text, useInput } from "ink";
+import { Box, Text, useInput, useStdout } from "ink";
 import type { V1Pod, KubeConfig } from "@kubernetes/client-node";
 import { useLogStream } from "../hooks/useLogStream.js";
-import { podHealth } from "../utils/health.js";
-import { HealthStatus } from "../utils/health.js";
+import { podHealth, HealthStatus } from "../utils/health.js";
+import {
+  type LogLevel,
+  filterByLevel,
+  detectLineLevel,
+  levelColor,
+  nextLevel,
+} from "../utils/logLevel.js";
 
-const TAIL_LINES = 25;
+// chrome: view header(1) + view footer(1) + pane border top+bottom(2)
+//       + pane name row(1) + pane ns row(1) + pane separator(1) + pane footer(1) = 8
+const PANE_CHROME = 8;
 
 interface PodPaneProps {
   pod: V1Pod;
   kubeConfig: KubeConfig;
   isFocused: boolean;
+  logLevel: LogLevel;
+  tailLines: number;
 }
 
-function PodPane({ pod, kubeConfig, isFocused }: PodPaneProps) {
+function PodPane({ pod, kubeConfig, isFocused, logLevel, tailLines }: PodPaneProps) {
   const [scrollOffset, setScrollOffset] = useState(0);
 
   const namespace = pod.metadata?.namespace ?? "default";
@@ -29,11 +39,13 @@ function PodPane({ pod, kubeConfig, isFocused }: PodPaneProps) {
     containerName,
   );
 
+  const filtered = filterByLevel(lines, logLevel);
+
   useInput(
     (_input, key) => {
       if (key.upArrow) {
         setScrollOffset((prev) =>
-          Math.min(Math.max(0, lines.length - TAIL_LINES), prev + 3),
+          Math.min(Math.max(0, filtered.length - tailLines), prev + 3),
         );
       }
       if (key.downArrow) {
@@ -44,9 +56,9 @@ function PodPane({ pod, kubeConfig, isFocused }: PodPaneProps) {
   );
 
   const isFollowing = scrollOffset === 0;
-  const endIndex = lines.length - scrollOffset;
-  const startIndex = Math.max(0, endIndex - TAIL_LINES);
-  const visibleLines = lines.slice(startIndex, endIndex);
+  const endIndex = filtered.length - scrollOffset;
+  const startIndex = Math.max(0, endIndex - tailLines);
+  const visibleLines = filtered.slice(startIndex, endIndex);
 
   const health = podHealth(pod);
   const healthColor =
@@ -71,9 +83,16 @@ function PodPane({ pod, kubeConfig, isFocused }: PodPaneProps) {
     >
       {/* Pane header */}
       <Box paddingX={1} justifyContent="space-between">
-        <Text bold color={isFocused ? "cyan" : undefined}>
-          {podName.length > 24 ? podName.slice(0, 23) + "…" : podName}
-        </Text>
+        <Box>
+          <Text bold color={isFocused ? "cyan" : undefined}>
+            {podName.length > 24 ? podName.slice(0, 23) + "…" : podName}
+          </Text>
+          {logLevel !== "ALL" && (
+            <Text color={levelColor(logLevel as Exclude<LogLevel, "ALL">)} bold>
+              {" "}[{logLevel}]
+            </Text>
+          )}
+        </Box>
         <Box>
           <Text color={healthColor}>● {phase}</Text>
           <Text dimColor>
@@ -95,22 +114,27 @@ function PodPane({ pod, kubeConfig, isFocused }: PodPaneProps) {
       </Box>
 
       {/* Log tail */}
-      <Box flexDirection="column" paddingX={1} flexGrow={1} overflow="hidden">
+      <Box flexDirection="column" paddingX={1} height={tailLines} overflow="hidden">
         {error && <Text color="red">{error}</Text>}
-        {lines.length === 0 && !error && (
-          <Text dimColor>Waiting for logs…</Text>
-        )}
-        {visibleLines.map((line, i) => (
-          <Text key={startIndex + i} wrap="truncate">
-            {line}
+        {filtered.length === 0 && !error && (
+          <Text dimColor>
+            {logLevel !== "ALL" ? `No ${logLevel} lines yet…` : "Waiting for logs…"}
           </Text>
-        ))}
+        )}
+        {visibleLines.map((line, i) => {
+          const color = levelColor(detectLineLevel(line));
+          return (
+            <Text key={startIndex + i} color={color} dimColor={!color} wrap="truncate">
+              {line}
+            </Text>
+          );
+        })}
       </Box>
 
       {/* Footer */}
       <Box paddingX={1}>
         <Text dimColor>
-          {isFollowing ? "● follow" : "⏸ paused"} · {lines.length} lines
+          {isFollowing ? "● follow" : "⏸ paused"} · {filtered.length} lines
           {!isFollowing && ` (↑${scrollOffset})`}
         </Text>
       </Box>
@@ -129,7 +153,11 @@ export function MultiPodLogView({
   kubeConfig,
   onClose,
 }: MultiPodLogViewProps) {
+  const { stdout } = useStdout();
   const [focusedIndex, setFocusedIndex] = useState(0);
+  const [logLevel, setLogLevel] = useState<LogLevel>("ALL");
+
+  const tailLines = Math.max(5, (stdout?.rows ?? 24) - PANE_CHROME);
 
   useInput((input, key) => {
     if (key.escape) {
@@ -142,6 +170,10 @@ export function MultiPodLogView({
     if (key.rightArrow || input === "l") {
       setFocusedIndex((i) => Math.min(pods.length - 1, i + 1));
     }
+    // Shift+L cycles log level across all panes
+    if (input === "L") {
+      setLogLevel((cur) => nextLevel(cur));
+    }
   });
 
   return (
@@ -153,8 +185,13 @@ export function MultiPodLogView({
             Multi-pod logs —{" "}
           </Text>
           <Text dimColor>{pods.length} pods</Text>
+          {logLevel !== "ALL" && (
+            <Text color={levelColor(logLevel as Exclude<LogLevel, "ALL">)} bold>
+              {" "}[{logLevel}]
+            </Text>
+          )}
         </Box>
-        <Text dimColor>[←→ / h/l] focus [↑↓] scroll [Esc] back to table</Text>
+        <Text dimColor>[←→/h/l] focus  [↑↓] scroll  [L] level ({logLevel})  [Esc] back</Text>
       </Box>
 
       {/* Panes */}
@@ -165,6 +202,8 @@ export function MultiPodLogView({
             pod={pod}
             kubeConfig={kubeConfig}
             isFocused={i === focusedIndex}
+            logLevel={logLevel}
+            tailLines={tailLines}
           />
         ))}
       </Box>
