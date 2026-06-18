@@ -17,9 +17,12 @@ import { ContextSwitcher } from "./components/ContextSwitcher.js";
 import { NamespacePicker } from "./components/NamespacePicker.js";
 import { PodDetail } from "./components/PodDetail.js";
 import { MultiPodLogView } from "./components/MultiPodLogView.js";
+import { DeploymentDetail } from "./components/DeploymentDetail.js";
 import { useKubeClient } from "./hooks/useKubeClient.js";
 import { useResources } from "./hooks/useResources.js";
 import { useAlerts } from "./hooks/useAlerts.js";
+import { useFavourites } from "./hooks/useFavourites.js";
+import { useRestartHistory } from "./hooks/useRestartHistory.js";
 import {
   podHealth,
   deploymentHealth,
@@ -50,6 +53,7 @@ export function App({ mutationsEnabled, maxReplicas }: AppProps) {
     new Set(),
   );
   const [multiPodView, setMultiPodView] = useState(false);
+  const [detailDeployment, setDetailDeployment] = useState<V1Deployment | null>(null);
   const [pendingMutation, setPendingMutation] = useState<null | {
     title: string;
     description: string;
@@ -58,6 +62,7 @@ export function App({ mutationsEnabled, maxReplicas }: AppProps) {
   }>(null);
 
   const kubeClient = useKubeClient();
+  const { favourites, toggle: toggleFavourite } = useFavourites();
 
   const pods = useResources<V1Pod>(kubeClient.kubeConfig, "/api/v1/pods", {
     namespaced: true,
@@ -93,10 +98,12 @@ export function App({ mutationsEnabled, maxReplicas }: AppProps) {
 
   const getPodHealth = useCallback((pod: V1Pod) => podHealth(pod), []);
   const { alerts, dismiss } = useAlerts(pods.resources, getPodHealth);
+  const restartHistory = useRestartHistory(pods.resources);
 
   // Dynamic chrome: accounts for whether summary bar and alert banner are currently rendered
   const isOverlay =
     !!detailPod ||
+    !!detailDeployment ||
     multiPodView ||
     showContextSwitcher ||
     showNamespacePicker ||
@@ -117,6 +124,7 @@ export function App({ mutationsEnabled, maxReplicas }: AppProps) {
       showContextSwitcher ||
       showNamespacePicker ||
       detailPod ||
+      detailDeployment ||
       multiPodView
     )
       return;
@@ -165,14 +173,14 @@ export function App({ mutationsEnabled, maxReplicas }: AppProps) {
         }
       }
 
-      if (mutationsEnabled && activeTab === parseInt("1", 10)) {
+      if (activeTab === 1) {
         const deployArr = Array.from(deployments.resources.values());
         const deploy = deployArr[selectedIndex];
         if (!deploy) return;
         const name = deploy.metadata?.name ?? "";
         const ns = deploy.metadata?.namespace ?? "";
 
-        if (input === "R") {
+        if (mutationsEnabled && input === "R") {
           setPendingMutation({
             title: "Confirm Restart",
             description: `Rollout restart deployment "${name}" in namespace "${ns}"?`,
@@ -353,14 +361,21 @@ export function App({ mutationsEnabled, maxReplicas }: AppProps) {
       }));
   }
 
+  function pinFavourites(rows: ResourceRow[]): ResourceRow[] {
+    if (favourites.size === 0) return rows;
+    const pinned = rows.filter((r) => favourites.has(r.uid));
+    const rest = rows.filter((r) => !favourites.has(r.uid));
+    return [...pinned, ...rest];
+  }
+
   const tabRows: ResourceRow[][] = [
-    buildPodRows(),
-    buildDeploymentRows(),
-    buildServiceRows(),
+    pinFavourites(buildPodRows()),
+    pinFavourites(buildDeploymentRows()),
+    pinFavourites(buildServiceRows()),
     buildNamespaceRows(),
     buildNodeRows(),
     buildEventRows(),
-    buildPVCRows(),
+    pinFavourites(buildPVCRows()),
   ];
 
   const tabSummaries = tabRows.map((rows) => ({
@@ -402,7 +417,10 @@ export function App({ mutationsEnabled, maxReplicas }: AppProps) {
       return "[↑↓] Navigate  [Enter] Select  [Esc] Cancel";
     }
     if (detailPod) {
-      return "[↑↓] Scroll  [[] []] Container  [f] Follow  [/] Search  [Esc] Close";
+      return "[↑↓] Scroll  [[] []] Container  [f] Follow  [/] Search  [h] Restarts  [e] Export  [Esc] Close";
+    }
+    if (detailDeployment) {
+      return "[↑↓] Nav  [r/Enter] Rollback  [Esc] Close";
     }
     if (multiPodView) {
       return "[↑↓] Scroll  [Esc] Close";
@@ -523,6 +541,35 @@ export function App({ mutationsEnabled, maxReplicas }: AppProps) {
             pod={detailPod}
             kubeConfig={kubeClient.kubeConfig}
             onClose={() => setDetailPod(null)}
+            restartHistory={restartHistory}
+          />
+        ) : detailDeployment ? (
+          <DeploymentDetail
+            deployment={detailDeployment}
+            kubeConfig={kubeClient.kubeConfig}
+            onClose={() => setDetailDeployment(null)}
+            onRollback={(deploy, revision) => {
+              const rs = Array.from(deployments.resources.values()).find(
+                (d) => d.metadata?.uid === deploy.metadata?.uid,
+              );
+              if (!rs) return;
+              const name = deploy.metadata?.name ?? "";
+              const ns = deploy.metadata?.namespace ?? "";
+              setPendingMutation({
+                title: "Confirm Rollback",
+                description: `Roll back "${name}" to revision #${revision}?`,
+                namespace: ns,
+                action: () =>
+                  mutate(kubeClient.appsV1 as any, {
+                    action: MutationAction.RollbackDeployment,
+                    name,
+                    namespace: ns,
+                    templateSpec: deploy.spec?.template?.spec as Record<string, unknown>,
+                    revision,
+                  }),
+              });
+              setDetailDeployment(null);
+            }}
           />
         ) : showContextSwitcher ? (
           <ContextSwitcher
@@ -567,7 +614,6 @@ export function App({ mutationsEnabled, maxReplicas }: AppProps) {
               if (activeTab === 0) {
                 // If 2+ pods are checked, open multi-pod view
                 if (selectedPodUids.size >= 2) {
-                  // Also make sure the activated row is included
                   setSelectedPodUids((prev) => new Set([...prev, row.uid]));
                   setMultiPodView(true);
                   return;
@@ -577,7 +623,15 @@ export function App({ mutationsEnabled, maxReplicas }: AppProps) {
                 );
                 if (pod) setDetailPod(pod);
               }
+              if (activeTab === 1) {
+                const deploy = Array.from(deployments.resources.values()).find(
+                  (d) => d.metadata?.uid === row.uid,
+                );
+                if (deploy) setDetailDeployment(deploy);
+              }
             }}
+            favouriteUids={favourites}
+            onToggleFavourite={(row) => toggleFavourite(row.uid)}
             selectedUids={activeTab === 0 ? selectedPodUids : undefined}
             onToggleSelect={
               activeTab === 0

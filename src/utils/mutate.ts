@@ -9,6 +9,7 @@ export enum MutationAction {
   RestartDeployment = "RestartDeployment",
   ScaleDeployment = "ScaleDeployment",
   ForceDeletePod = "ForceDeletePod",
+  RollbackDeployment = "RollbackDeployment",
 }
 
 const IMMUTABLE_NAMESPACES = new Set(["kube-system"]);
@@ -34,6 +35,14 @@ export type MutateParams =
       namespace: string;
       replicas: number;
       maxReplicas?: number;
+    }
+  | {
+      action: MutationAction.RollbackDeployment;
+      name: string;
+      namespace: string;
+      /** Pod template spec from the target ReplicaSet to restore */
+      templateSpec: Record<string, unknown>;
+      revision: number;
     };
 
 async function appendAudit(entry: Record<string, unknown>): Promise<void> {
@@ -99,6 +108,19 @@ export async function mutate(client: any, params: MutateParams): Promise<void> {
               },
             },
           },
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          { headers: { "Content-Type": "application/merge-patch+json" } },
+        );
+        break;
+      }
+      case MutationAction.RollbackDeployment: {
+        await client.patchNamespacedDeployment(
+          params.name,
+          params.namespace,
+          { spec: { template: { spec: params.templateSpec } } },
           undefined,
           undefined,
           undefined,
