@@ -7,12 +7,14 @@ import type {
   V1Namespace,
   V1Node,
   CoreV1Event,
+  V1PersistentVolumeClaim,
 } from "@kubernetes/client-node";
 import { NavTabs, TAB_LABELS } from "./components/NavTabs.js";
 import { ResourceTable, ResourceRow } from "./components/ResourceTable.js";
 import { AlertBanner } from "./components/AlertBanner.js";
 import { ConfirmModal } from "./components/ConfirmModal.js";
 import { ContextSwitcher } from "./components/ContextSwitcher.js";
+import { NamespacePicker } from "./components/NamespacePicker.js";
 import { PodDetail } from "./components/PodDetail.js";
 import { MultiPodLogView } from "./components/MultiPodLogView.js";
 import { useKubeClient } from "./hooks/useKubeClient.js";
@@ -22,6 +24,8 @@ import {
   podHealth,
   deploymentHealth,
   nodeHealth,
+  nodePressureLabel,
+  pvcHealth,
   HealthStatus,
 } from "./utils/health.js";
 import { mutate, MutationAction } from "./utils/mutate.js";
@@ -39,6 +43,8 @@ export function App({ mutationsEnabled, maxReplicas }: AppProps) {
   const [activeTab, setActiveTab] = useState(0);
   const [selectedIndex, setSelectedIndex] = useState(0);
   const [showContextSwitcher, setShowContextSwitcher] = useState(false);
+  const [showNamespacePicker, setShowNamespacePicker] = useState(false);
+  const [activeNamespace, setActiveNamespace] = useState("all");
   const [detailPod, setDetailPod] = useState<V1Pod | null>(null);
   const [selectedPodUids, setSelectedPodUids] = useState<Set<string>>(
     new Set(),
@@ -79,13 +85,22 @@ export function App({ mutationsEnabled, maxReplicas }: AppProps) {
     "/api/v1/events",
     { namespaced: true },
   );
+  const pvcs = useResources<V1PersistentVolumeClaim>(
+    kubeClient.kubeConfig,
+    "/api/v1/persistentvolumeclaims",
+    { namespaced: true },
+  );
 
   const getPodHealth = useCallback((pod: V1Pod) => podHealth(pod), []);
   const { alerts, dismiss } = useAlerts(pods.resources, getPodHealth);
 
   // Dynamic chrome: accounts for whether summary bar and alert banner are currently rendered
   const isOverlay =
-    !!detailPod || multiPodView || showContextSwitcher || !!pendingMutation;
+    !!detailPod ||
+    multiPodView ||
+    showContextSwitcher ||
+    showNamespacePicker ||
+    !!pendingMutation;
   const appChrome =
     1 + // header
     2 + // tabs (border line + content row)
@@ -93,12 +108,17 @@ export function App({ mutationsEnabled, maxReplicas }: AppProps) {
     (alerts[0] ? 3 : 0) + // alert banner when visible (top border + content + bottom border)
     2; // footer (border line + text)
   const tableMaxHeight = Math.max(5, (stdout?.rows ?? 24) - appChrome);
-  const activeNamespace = "all"; // read-only display; filtering wired in a future spec
 
   const connectionError = pods.error ?? deployments.error;
 
   useInput((input, key) => {
-    if (pendingMutation || showContextSwitcher || detailPod || multiPodView)
+    if (
+      pendingMutation ||
+      showContextSwitcher ||
+      showNamespacePicker ||
+      detailPod ||
+      multiPodView
+    )
       return;
     if (key.tab) {
       setActiveTab((i) => (i + 1) % TAB_LABELS.length);
@@ -106,6 +126,7 @@ export function App({ mutationsEnabled, maxReplicas }: AppProps) {
     }
     if (input === "q" || (key.ctrl && input === "c")) exit();
     if (input === "c") setShowContextSwitcher(true);
+    if (input === "n") setShowNamespacePicker(true);
 
     if (activeTab === 0) {
       const podArr = Array.from(pods.resources.values());
@@ -168,8 +189,15 @@ export function App({ mutationsEnabled, maxReplicas }: AppProps) {
     }
   });
 
+  function nsFilter<T extends { metadata?: { namespace?: string } }>(
+    items: T[],
+  ): T[] {
+    if (activeNamespace === "all") return items;
+    return items.filter((x) => x.metadata?.namespace === activeNamespace);
+  }
+
   function buildPodRows(): ResourceRow[] {
-    return Array.from(pods.resources.values()).map((pod) => {
+    return nsFilter(Array.from(pods.resources.values())).map((pod) => {
       const cs = pod.status?.containerStatuses ?? [];
       const readyCount = cs.filter((s) => s.ready).length;
       const phase = pod.status?.phase ?? "Unknown";
@@ -189,7 +217,7 @@ export function App({ mutationsEnabled, maxReplicas }: AppProps) {
   }
 
   function buildDeploymentRows(): ResourceRow[] {
-    return Array.from(deployments.resources.values()).map((d) => {
+    return nsFilter(Array.from(deployments.resources.values())).map((d) => {
       const image = d.spec?.template?.spec?.containers?.[0]?.image ?? "";
       const shortImage = (image.split("/").pop() ?? image).slice(0, 22);
       return {
@@ -210,7 +238,7 @@ export function App({ mutationsEnabled, maxReplicas }: AppProps) {
   }
 
   function buildServiceRows(): ResourceRow[] {
-    return Array.from(services.resources.values()).map((s) => {
+    return nsFilter(Array.from(services.resources.values())).map((s) => {
       const svcType = s.spec?.type ?? "ClusterIP";
       const ports =
         s.spec?.ports
@@ -260,6 +288,7 @@ export function App({ mutationsEnabled, maxReplicas }: AppProps) {
           .map((k) => k.split("/")[1])
           .join(",") || "worker";
       const version = n.status?.nodeInfo?.kubeletVersion ?? "";
+      const pressure = nodePressureLabel(n);
       return {
         uid: n.metadata?.uid ?? "",
         name: n.metadata?.name ?? "",
@@ -268,9 +297,39 @@ export function App({ mutationsEnabled, maxReplicas }: AppProps) {
         creationTimestamp: n.metadata?.creationTimestamp,
         extra: roles,
         extra2: version,
-        extra3: (n.status?.nodeInfo?.osImage ?? "").slice(0, 20),
+        extra3: pressure
+          ? `⚠ ${pressure}`
+          : (n.status?.nodeInfo?.osImage ?? "").slice(0, 20),
       };
     });
+  }
+
+  function buildPVCRows(): ResourceRow[] {
+    return Array.from(pvcs.resources.values())
+      .filter(
+        (pvc) =>
+          activeNamespace === "all" ||
+          pvc.metadata?.namespace === activeNamespace,
+      )
+      .map((pvc) => {
+        const phase = pvc.status?.phase ?? "Unknown";
+        const capacity =
+          pvc.status?.capacity?.["storage"] ??
+          pvc.spec?.resources?.requests?.["storage"] ??
+          "";
+        const storageClass = pvc.spec?.storageClassName ?? "";
+        const volumeName = (pvc.spec?.volumeName ?? "").slice(0, 22);
+        return {
+          uid: pvc.metadata?.uid ?? "",
+          name: pvc.metadata?.name ?? "",
+          namespace: pvc.metadata?.namespace ?? "",
+          status: pvcHealth(pvc),
+          creationTimestamp: pvc.metadata?.creationTimestamp,
+          extra: phase,
+          extra2: capacity,
+          extra3: storageClass || volumeName,
+        };
+      });
   }
 
   function buildEventRows(): ResourceRow[] {
@@ -301,6 +360,7 @@ export function App({ mutationsEnabled, maxReplicas }: AppProps) {
     buildNamespaceRows(),
     buildNodeRows(),
     buildEventRows(),
+    buildPVCRows(),
   ];
 
   const tabSummaries = tabRows.map((rows) => ({
@@ -315,6 +375,7 @@ export function App({ mutationsEnabled, maxReplicas }: AppProps) {
     "namespaces",
     "nodes",
     "events",
+    "pvcs",
   ];
   // Per-tab column header labels: [extraLabel, extra2Label, extra3Label]
   const TAB_COL_LABELS: [string, string, string][] = [
@@ -322,8 +383,9 @@ export function App({ mutationsEnabled, maxReplicas }: AppProps) {
     ["REPLICAS", "IMAGE", "STRATEGY"],
     ["TYPE", "PORTS", "CLUSTER IP"],
     ["", "", "LABELS"],
-    ["ROLES", "VERSION", "OS"],
+    ["ROLES", "VERSION", "OS / PRESSURE"],
     ["REASON", "MESSAGE", "COUNT"],
+    ["PHASE", "CAPACITY", "STORAGECLASS"],
   ];
   const tabLoading = [
     pods.loading,
@@ -332,10 +394,11 @@ export function App({ mutationsEnabled, maxReplicas }: AppProps) {
     namespaces.loading,
     nodes.loading,
     events.loading,
+    pvcs.loading,
   ];
 
   function getFooterHints(): string {
-    if (showContextSwitcher || pendingMutation) {
+    if (showContextSwitcher || showNamespacePicker || pendingMutation) {
       return "[↑↓] Navigate  [Enter] Select  [Esc] Cancel";
     }
     if (detailPod) {
@@ -344,7 +407,8 @@ export function App({ mutationsEnabled, maxReplicas }: AppProps) {
     if (multiPodView) {
       return "[↑↓] Scroll  [Esc] Close";
     }
-    const base = "[↑↓] Nav  [Tab] Switch  [/] Search  [c] Context  [q] Quit";
+    const nsLabel = activeNamespace === "all" ? "all" : activeNamespace;
+    const base = `[↑↓] Nav  [Tab] Switch  [/] Search  [c] Context  [n] NS:${nsLabel}  [q] Quit`;
     if (activeTab === 0) {
       return mutationsEnabled
         ? base + "  [Space] Select  [Enter] Detail  [d] Delete  [D] Force-del"
@@ -469,6 +533,19 @@ export function App({ mutationsEnabled, maxReplicas }: AppProps) {
               setShowContextSwitcher(false);
             }}
             onClose={() => setShowContextSwitcher(false)}
+          />
+        ) : showNamespacePicker ? (
+          <NamespacePicker
+            namespaces={Array.from(namespaces.resources.values())
+              .map((ns) => ns.metadata?.name ?? "")
+              .filter(Boolean)}
+            currentNamespace={activeNamespace}
+            onSelect={(ns) => {
+              setActiveNamespace(ns);
+              setShowNamespacePicker(false);
+              setSelectedIndex(0);
+            }}
+            onClose={() => setShowNamespacePicker(false)}
           />
         ) : pendingMutation ? (
           <ConfirmModal
