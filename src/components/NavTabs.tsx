@@ -8,8 +8,9 @@ export const TAB_LABELS = [
   "Namespaces",
   "Nodes",
   "Events",
+  "PVCs",
 ] as const;
-export type TabIndex = 0 | 1 | 2 | 3 | 4 | 5;
+export type TabIndex = 0 | 1 | 2 | 3 | 4 | 5 | 6;
 
 export interface TabSummary {
   total: number;
