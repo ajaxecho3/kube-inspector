@@ -1,6 +1,11 @@
-import React, { useState, useMemo } from "react";
+import React, { useState, useMemo, useEffect } from "react";
 import { Box, Text, useInput, useStdout } from "ink";
+import * as fs from "node:fs/promises";
+import * as path from "node:path";
+import * as os from "node:os";
 import type { V1Pod, KubeConfig } from "@kubernetes/client-node";
+import type { RestartHistory } from "../hooks/useRestartHistory.js";
+import { RestartGraph } from "./RestartGraph.js";
 import { useLogStream } from "../hooks/useLogStream.js";
 import { formatAge } from "../utils/format.js";
 import { SplitLogView } from "./SplitLogView.js";
@@ -41,9 +46,10 @@ interface PodDetailProps {
   pod: V1Pod;
   kubeConfig: KubeConfig;
   onClose: () => void;
+  restartHistory?: RestartHistory;
 }
 
-export function PodDetail({ pod, kubeConfig, onClose }: PodDetailProps) {
+export function PodDetail({ pod, kubeConfig, onClose, restartHistory }: PodDetailProps) {
   const { stdout } = useStdout();
   const namespace = pod.metadata?.namespace ?? "default";
   const podName   = pod.metadata?.name ?? "";
@@ -54,6 +60,10 @@ export function PodDetail({ pod, kubeConfig, onClose }: PodDetailProps) {
   const [scrollOffset,    setScrollOffset]    = useState(0);
   const [follow,          setFollow]          = useState(true);
   const [splitMode,       setSplitMode]       = useState(false);
+  const [showRestartGraph, setShowRestartGraph] = useState(false);
+
+  // ── Export state ───────────────────────────────────────────────────────────
+  const [exportMsg, setExportMsg] = useState<string | null>(null);
 
   // ── Log filter / display state ─────────────────────────────────────────────
   const [logLevel,       setLogLevel]       = useState<LogLevel>("ALL");
@@ -73,6 +83,24 @@ export function PodDetail({ pod, kubeConfig, onClose }: PodDetailProps) {
   const sinceSeconds = sinceOption !== undefined ? sinceOption * 60 : undefined;
 
   const containerName = containers[activeContainer]?.name ?? "";
+
+  // ── #18: Auto-enable previous logs for CrashLoopBackOff containers ─────────
+  const activeCs = pod.status?.containerStatuses?.find(
+    (s) => s.name === containerName,
+  );
+  const isCrashLoop =
+    activeCs?.state?.waiting?.reason === "CrashLoopBackOff";
+
+  useEffect(() => {
+    if (isCrashLoop) {
+      setShowPrevious(true);
+      setFollow(false);
+    } else {
+      setShowPrevious(false);
+      setFollow(true);
+    }
+    setScrollOffset(0);
+  }, [containerName, isCrashLoop]);
 
   // Chrome: title(1) + meta(1) + labels(1) + containers(capped 4) + log-header(1)
   //       + hint-row-1(1) + hint-row-2(1) + round-border(2) + 2 inner borders(2) = 14 + containers
@@ -220,6 +248,27 @@ export function PodDetail({ pod, kubeConfig, onClose }: PodDetailProps) {
         });
         setScrollOffset(0);
       }
+
+      // #10 — Export logs to file
+      if (input === "e") {
+        const dir = path.join(os.homedir(), "kube-inspector-logs");
+        const filename = `${podName}-${containerName}-${Date.now()}.log`;
+        const filepath = path.join(dir, filename);
+        const content = displayLines.map((d) => d.display).join("\n");
+        fs.mkdir(dir, { recursive: true })
+          .then(() => fs.writeFile(filepath, content, "utf-8"))
+          .then(() => {
+            setExportMsg(`Exported → ${filepath}`);
+            setTimeout(() => setExportMsg(null), 4000);
+          })
+          .catch((err) => {
+            setExportMsg(`Export failed: ${String(err)}`);
+            setTimeout(() => setExportMsg(null), 4000);
+          });
+      }
+
+      // #5 — Restart history graph
+      if (input === "h") setShowRestartGraph((v) => !v);
     }
   });
 
@@ -301,22 +350,60 @@ export function PodDetail({ pod, kubeConfig, onClose }: PodDetailProps) {
     badges.push(<Text key="re" color="yellow" dimColor> [RE]</Text>);
 
   // ── JSX ───────────────────────────────────────────────────────────────────
+
+  // Show restart graph overlay
+  if (showRestartGraph && restartHistory) {
+    return (
+      <RestartGraph
+        pod={pod}
+        history={restartHistory}
+        onClose={() => setShowRestartGraph(false)}
+      />
+    );
+  }
+
   return (
-    <Box flexDirection="column" borderStyle="round" borderColor="cyan" flexGrow={1}>
+    <Box flexDirection="column" borderStyle="round" borderColor={isCrashLoop ? "red" : "cyan"} flexGrow={1}>
       {/* Title bar */}
       <Box justifyContent="space-between" paddingX={1}>
         <Box>
-          <Text bold color="cyan">Pod: </Text>
+          <Text bold color={isCrashLoop ? "red" : "cyan"}>Pod: </Text>
           <Text bold>{podName}</Text>
           <Text dimColor> ns: {namespace}</Text>
+          {isCrashLoop && (
+            <Text color="red" bold> ⚠ CRASHLOOP</Text>
+          )}
         </Box>
         <Box>
           {containers.length > 1 && (
             <Text dimColor>[m] {splitMode ? "single" : "split"} logs </Text>
           )}
-          <Text dimColor>[esc] close</Text>
+          <Text dimColor>[h] history  [e] export  [esc] close</Text>
         </Box>
       </Box>
+
+      {/* #18 Crash detail banner */}
+      {isCrashLoop && activeCs?.lastState?.terminated && (() => {
+        const t = activeCs.lastState.terminated;
+        return (
+          <Box paddingX={1} borderStyle="single" borderTop={false} borderLeft={false} borderRight={false} borderBottom={true}>
+            <Text color="red" bold>Last crash: </Text>
+            <Text color="yellow">exit {t.exitCode ?? "?"} </Text>
+            {t.reason && <Text color="yellow">{t.reason} </Text>}
+            {t.message && <Text dimColor>{t.message.slice(0, 60)} </Text>}
+            {t.finishedAt && <Text dimColor>finished {formatAge(t.finishedAt)} ago</Text>}
+          </Box>
+        );
+      })()}
+
+      {/* Export confirmation */}
+      {exportMsg && (
+        <Box paddingX={1}>
+          <Text color={exportMsg.startsWith("Export failed") ? "red" : "green"}>
+            {exportMsg}
+          </Text>
+        </Box>
+      )}
 
       {/* Metadata row */}
       <Box paddingX={1} borderStyle="single" borderTop={false} borderLeft={false} borderRight={false} borderBottom={true}>
@@ -441,7 +528,7 @@ export function PodDetail({ pod, kubeConfig, onClose }: PodDetailProps) {
               [↑↓][g/G] Scroll  [f] Follow  [/] Search  [r] Regex({regexMode ? "ON" : "off"})  [l] Level({logLevel})  [Esc] Close
             </Text>
             <Text dimColor>
-              [t] Timestamps({showTimestamps ? "ON" : "off"})  [w] Wrap({wrapLines ? "ON" : "off"})  [s] Since({sinceOption !== undefined ? `${sinceOption}m` : "all"})  [p] Prev({showPrevious ? "ON" : "off"})  [+/-] Tail({tailLines})
+              [t] Timestamps({showTimestamps ? "ON" : "off"})  [w] Wrap({wrapLines ? "ON" : "off"})  [s] Since({sinceOption !== undefined ? `${sinceOption}m` : "all"})  [p] Prev({showPrevious ? "ON" : "off"})  [+/-] Tail({tailLines})  [e] Export  [h] Restarts
               {containers.length > 1 ? "  [[] []] Ctr" : ""}
             </Text>
           </Box>

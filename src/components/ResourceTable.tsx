@@ -126,6 +126,8 @@ export function ResourceTable({
   onActivate,
   selectedUids,
   onToggleSelect,
+  favouriteUids,
+  onToggleFavourite,
   maxHeight,
   mutationsEnabled,
   loading,
@@ -240,6 +242,10 @@ export function ResourceTable({
     }
     if (input === " " && filteredRows[safeLocal] && onToggleSelect) {
       onToggleSelect(filteredRows[safeLocal]);
+      return;
+    }
+    if (input === "*" && filteredRows[safeLocal] && onToggleFavourite) {
+      onToggleFavourite(filteredRows[safeLocal]);
       return;
     }
     if (key.upArrow) moveUp();
@@ -365,9 +371,14 @@ export function ResourceTable({
         const isSelected = absoluteIndex === safeLocal;
         const isEven = absoluteIndex % 2 === 0;
         const isChecked = selectedUids?.has(row.uid) ?? false;
+        const isFavourite = favouriteUids?.has(row.uid) ?? false;
 
         return (
           <Box key={row.uid} paddingX={1}>
+            {/* Favourite star */}
+            <Text color={isFavourite ? "yellow" : "gray"}>
+              {isFavourite ? "★" : " "}
+            </Text>
             {/* Checkbox */}
             <Text
               color={isChecked ? "magenta" : isSelected ? "cyan" : "gray"}
@@ -473,7 +484,7 @@ export function ResourceTable({
           {selectedUids && selectedUids.size > 1
             ? `  ${selectedUids.size} selected → enter`
             : ""}{" "}
-          / search
+          / search  * favourite
           {mutationsEnabled
             ? "  d delete  R restart  s scale  D force-del"
             : "  (read-only)"}
