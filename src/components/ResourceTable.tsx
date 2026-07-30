@@ -3,6 +3,7 @@ import { Box, Text, useInput, useStdout } from "ink";
 import { StatusBadge } from "./StatusBadge.js";
 import { HealthStatus } from "../utils/health.js";
 import { formatAge } from "../utils/format.js";
+import type { UsageSparkSegment } from "../utils/metrics.js";
 
 export interface ResourceRow {
   uid: string;
@@ -16,9 +17,14 @@ export interface ResourceRow {
   /** Formatted CPU usage, e.g. "120m" or "1.20" — from metrics-server, when available */
   cpu?: string;
   cpuColor?: string;
+  /** Trend sparkline for CPU — each bar is sized/colored by its own percent
+   * of the pod's CPU request (health color), or plain when no request is set */
+  cpuSpark?: UsageSparkSegment[];
   /** Formatted memory usage, e.g. "256 MiB" — from metrics-server, when available */
   mem?: string;
   memColor?: string;
+  /** Trend sparkline for memory — same request-relative treatment as cpuSpark */
+  memSpark?: UsageSparkSegment[];
 }
 
 interface ResourceTableProps {
@@ -40,10 +46,43 @@ interface ResourceTableProps {
 }
 
 const COL_AGE = 6;
-// Wide enough for "<value> <8-char sparkline>", e.g. "1.50 ▂▃▅▅▆▇██"
-const COL_CPU = 14;
-const COL_MEM = 18;
+// Sparklines are capped to SPARK_SAMPLES characters (see App.tsx) so they
+// always fit their reserved column — value sub-column + spark sub-column
+// (8 chars of bars + 1 trailing gap) = the full CPU/MEM column width.
+export const SPARK_SAMPLES = 8;
+const CPU_VALUE_WIDTH = 6;
+const MEM_VALUE_WIDTH = 9;
+const SPARK_WIDTH = SPARK_SAMPLES + 1;
+const COL_CPU = CPU_VALUE_WIDTH + SPARK_WIDTH;
+const COL_MEM = MEM_VALUE_WIDTH + SPARK_WIDTH;
 const METRICS_MIN_WIDTH = 130;
+
+/** Renders a trend sparkline as individually-colored bars — color reflects
+ * each bar's own percent of its request/limit (green/yellow/red), or a plain
+ * neutral tone when no request is set — padded out to SPARK_WIDTH so the
+ * column stays fixed-width regardless of how many samples exist yet. */
+function renderSpark(segs: UsageSparkSegment[] | undefined, isSelected: boolean) {
+  const chars = segs ?? [];
+  const gap = SPARK_WIDTH - chars.length;
+  return (
+    <>
+      {chars.map((seg, i) => (
+        <Text
+          key={i}
+          inverse={isSelected}
+          bold={!isSelected && !!seg.color}
+          color={isSelected ? "cyan" : seg.color}
+          dimColor={!isSelected && !seg.color}
+        >
+          {seg.char}
+        </Text>
+      ))}
+      <Text inverse={isSelected} dimColor={!isSelected}>
+        {" ".repeat(Math.max(0, gap))}
+      </Text>
+    </>
+  );
+}
 
 const STATUS_LABEL: Record<HealthStatus, string> = {
   [HealthStatus.Healthy]: "● Healthy ",
@@ -207,8 +246,9 @@ export function ResourceTable({
       )
     : rows;
 
-  // Table-internal chrome: search bar(1) + marginBottom(1) + header(1) + border(1) + footer(1) + border(1) = 6
-  const TABLE_CHROME = 6;
+  // Table-internal chrome: search bar(1) + header(1) + border(1) = 3
+  // (key hints live in App.tsx's single global footer — no separate footer here)
+  const TABLE_CHROME = 3;
   const availableHeight = maxHeight ?? stdout?.rows ?? 24;
   const visibleCount = Math.max(5, availableHeight - TABLE_CHROME);
 
@@ -304,7 +344,7 @@ export function ResourceTable({
   return (
     <Box flexDirection="column">
       {/* Search bar */}
-      <Box justifyContent="space-between" marginBottom={1}>
+      <Box justifyContent="space-between">
         {searchMode ? (
           <Box>
             <Text color="cyan" bold>
@@ -336,7 +376,7 @@ export function ResourceTable({
               ● {
                 rows.filter((r) => r.status === HealthStatus.Critical).length
               }{" "}
-              critical
+              Critical
             </Text>
           )}
           {hasDegraded && (
@@ -345,7 +385,16 @@ export function ResourceTable({
               ● {
                 rows.filter((r) => r.status === HealthStatus.Degraded).length
               }{" "}
-              degraded
+              Degraded
+            </Text>
+          )}
+          {rows.length > 0 && (
+            <Text color="green">
+              {" "}
+              ● {
+                rows.filter((r) => r.status === HealthStatus.Healthy).length
+              }{" "}
+              Healthy
             </Text>
           )}
           <Text dimColor>
@@ -510,7 +559,8 @@ export function ResourceTable({
               </Text>
             )}
 
-            {/* CPU / MEM usage — only when metrics-server data is present */}
+            {/* CPU / MEM usage — value + bold trend sparkline, only when
+                metrics-server data is present */}
             {showMetrics && (
               <>
                 <Text
@@ -518,42 +568,23 @@ export function ResourceTable({
                   color={isSelected ? "cyan" : row.cpuColor}
                   dimColor={!isSelected && !row.cpuColor}
                 >
-                  {padEnd(row.cpu ?? "–", COL_CPU)}
+                  {padEnd(row.cpu ?? "–", CPU_VALUE_WIDTH)}
                 </Text>
+                {renderSpark(row.cpuSpark, isSelected)}
                 <Text
                   inverse={isSelected}
                   color={isSelected ? "cyan" : row.memColor}
                   dimColor={!isSelected && !row.memColor}
                 >
-                  {padEnd(row.mem ?? "–", COL_MEM)}
+                  {padEnd(row.mem ?? "–", MEM_VALUE_WIDTH)}
                 </Text>
+                {renderSpark(row.memSpark, isSelected)}
               </>
             )}
           </Box>
         );
       })}
 
-      {/* Footer hints */}
-      <Box
-        marginTop={1}
-        paddingX={1}
-        borderStyle="single"
-        borderBottom={false}
-        borderLeft={false}
-        borderRight={false}
-        borderTop={true}
-      >
-        <Text dimColor>
-          ↑↓ navigate space select enter open
-          {selectedUids && selectedUids.size > 1
-            ? `  ${selectedUids.size} selected → enter`
-            : ""}{" "}
-          / search  * favourite
-          {mutationsEnabled
-            ? "  d delete  R restart  s scale  D force-del"
-            : "  (read-only)"}
-        </Text>
-      </Box>
     </Box>
   );
 }

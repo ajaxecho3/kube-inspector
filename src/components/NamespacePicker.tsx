@@ -27,25 +27,31 @@ export function NamespacePicker({
   });
 
   return (
-    <Box flexDirection="column" borderStyle="round" borderColor="cyan" padding={1}>
-      <Text bold color="cyan">
-        Select namespace
-      </Text>
-      <Text dimColor>↑↓ Navigate  Enter Select  Esc Cancel</Text>
-      <Box flexDirection="column" marginTop={1}>
-        {options.map((ns, i) => {
-          const isActive = i === cursor;
-          const isCurrent = ns === currentNamespace;
-          return (
-            <Box key={ns}>
-              <Text color={isActive ? "cyan" : undefined} bold={isActive}>
-                {isActive ? "▶ " : "  "}
-                {ns}
-                {isCurrent ? " (current)" : ""}
-              </Text>
-            </Box>
-          );
-        })}
+    <Box
+      flexDirection="column"
+      borderStyle="round"
+      borderColor="cyan"
+      paddingX={2}
+      paddingY={1}
+    >
+      <Text bold>Select Namespace</Text>
+
+      <Box marginTop={1} flexDirection="column">
+        {options.map((ns, i) => (
+          <Text
+            key={ns}
+            color={i === cursor ? "cyan" : undefined}
+            inverse={i === cursor}
+          >
+            {i === cursor ? "▶ " : "  "}
+            {ns}
+            {ns === currentNamespace ? " (current)" : ""}
+          </Text>
+        ))}
+      </Box>
+
+      <Box marginTop={1}>
+        <Text dimColor>[↑↓] Navigate  [Enter] Select  [Esc] Cancel</Text>
       </Box>
     </Box>
   );

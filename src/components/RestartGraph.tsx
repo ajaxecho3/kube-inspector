@@ -31,7 +31,7 @@ export function RestartGraph({ pod, history, onClose }: RestartGraphProps) {
         <Text bold color="cyan">
           Restart History — {pod.metadata?.name}
         </Text>
-        <Text dimColor>[Esc] close</Text>
+        <Text dimColor>[Esc] Close</Text>
       </Box>
 
       <Box

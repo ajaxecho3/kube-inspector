@@ -12,3 +12,9 @@ export function sparkline(values: number[]): string {
     .map((v) => SPARK_CHARS[Math.min(7, Math.floor((v / max) * 7))])
     .join("");
 }
+
+/** Maps a 0..1 ratio to one of the 8 block-height characters used above. */
+export function charForRatio(ratio: number): string {
+  const r = Math.max(0, Math.min(1, ratio));
+  return SPARK_CHARS[Math.min(7, Math.floor(r * 7))];
+}

@@ -1,4 +1,5 @@
 import prettyBytes from "./pretty-bytes.js";
+import { charForRatio } from "./sparkline.js";
 
 /**
  * Parses a Kubernetes CPU quantity string (as returned by metrics-server,
@@ -67,6 +68,48 @@ export function usageColor(percent: number | null | undefined): string | undefin
   if (percent >= 85) return "red";
   if (percent >= 60) return "yellow";
   return "green";
+}
+
+/** Bright chalk variant of an already-resolved color name (or undefined) —
+ * used to make a sparkline's bars pop against its own (dimmer) value text. */
+export function brighten(color: string | undefined): string | undefined {
+  return color ? `${color}Bright` : undefined;
+}
+
+export interface UsageSparkSegment {
+  char: string;
+  /** Health color for this bar (green/yellow/red), or undefined when there's
+   * no request/limit to compare against — render those bars in a neutral tone. */
+  color?: string;
+}
+
+/**
+ * Builds per-bar sparkline segments from a raw sample history, using each
+ * sample's own percent of `referenceTotal` (a request or allocatable total)
+ * for BOTH bar height and color. This is deliberately not scaled against the
+ * window's own max: a series that's flat at 90% of its reference renders as
+ * a steady, tall, red trend, and a series flat at 10% renders as a steady,
+ * short, green trend. Scaling against the window's own max instead would
+ * make almost any stable series look permanently maxed out and orange/red,
+ * since one sample is always the local max.
+ *
+ * Falls back to a plain, uncolored, window-relative trend when no reference
+ * total is known (nothing meaningful to compare against, e.g. no resource
+ * request set on the pod).
+ */
+export function usageSpark(
+  samples: number[] | undefined,
+  referenceTotal: number,
+): UsageSparkSegment[] | undefined {
+  if (!samples || samples.length < 2) return undefined;
+  if (referenceTotal > 0) {
+    return samples.map((v) => {
+      const percent = (v / referenceTotal) * 100;
+      return { char: charForRatio(percent / 100), color: usageColor(percent) };
+    });
+  }
+  const max = Math.max(...samples, 1);
+  return samples.map((v) => ({ char: charForRatio(v / max), color: undefined }));
 }
 
 /** Renders a compact usage string, optionally with a percentage against a capacity value. */

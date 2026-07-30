@@ -10,7 +10,11 @@ import type {
   V1PersistentVolumeClaim,
 } from "@kubernetes/client-node";
 import { NavTabs, TAB_LABELS } from "./components/NavTabs.js";
-import { ResourceTable, ResourceRow } from "./components/ResourceTable.js";
+import {
+  ResourceTable,
+  ResourceRow,
+  SPARK_SAMPLES,
+} from "./components/ResourceTable.js";
 import { AlertBanner } from "./components/AlertBanner.js";
 import { ConfirmModal } from "./components/ConfirmModal.js";
 import { ContextSwitcher } from "./components/ContextSwitcher.js";
@@ -38,10 +42,10 @@ import {
   formatCpu,
   formatMemBytes,
   usageColor,
+  usageSpark,
   parseCpuToMillicores,
   parseMemoryToBytes,
 } from "./utils/metrics.js";
-import { sparkline } from "./utils/sparkline.js";
 
 const PROTECTED_NAMESPACES = new Set(["production", "prod", "kube-system"]);
 
@@ -112,22 +116,19 @@ export function App({ mutationsEnabled, maxReplicas }: AppProps) {
   const restartHistory = useRestartHistory(pods.resources);
   const metrics = useMetrics(kubeClient.kubeConfig);
 
-  // Dynamic chrome: accounts for whether summary bar and alert banner are currently rendered
-  const isOverlay =
-    !!detailPod ||
-    !!detailDeployment ||
-    !!scaleTarget ||
-    multiPodView ||
-    showContextSwitcher ||
-    showNamespacePicker ||
-    !!pendingMutation;
-  const appChrome =
+  // Chrome that sits above the main content area in every view: header +
+  // tabs + alert banner. Detail/overlay views (PodDetail, MultiPodLogView,
+  // etc.) replace the table but still render below this same chrome, so
+  // they need this number too — otherwise they size themselves against the
+  // full terminal height and end up rendering more rows than actually fit,
+  // which Ink then has to squeeze/overlap.
+  const chromeAboveContent =
     1 + // header
     2 + // tabs (border line + content row)
-    (isOverlay ? 0 : 1) + // summary bar (hidden in overlays)
-    (alerts[0] ? 3 : 0) + // alert banner when visible (top border + content + bottom border)
-    2; // footer (border line + text)
-  const tableMaxHeight = Math.max(5, (stdout?.rows ?? 24) - appChrome);
+    (alerts[0] ? 1 : 0); // alert banner when visible (single line, no border)
+  const contentMaxHeight = Math.max(5, (stdout?.rows ?? 24) - chromeAboveContent);
+  // The table view additionally has the global footer below it.
+  const tableMaxHeight = Math.max(5, contentMaxHeight - 2);
 
   const connectionError = pods.error ?? deployments.error;
 
@@ -268,22 +269,23 @@ export function App({ mutationsEnabled, maxReplicas }: AppProps) {
         extra: `${phase} ${readyCount}/${cs.length || "?"}`,
         extra2: restarts > 0 ? `↺${restarts}  ${node}` : node,
         extra3: pod.status?.podIP ?? "",
-        cpu: metrics.available
-          ? withTrend(formatCpu(usage?.cpuMillicores), hist?.cpu)
-          : undefined,
+        cpu: metrics.available ? formatCpu(usage?.cpuMillicores) : undefined,
         cpuColor: usageColor(cpuPct),
-        mem: metrics.available
-          ? withTrend(formatMemBytes(usage?.memBytes), hist?.mem)
-          : undefined,
+        cpuSpark: trendSpark(hist?.cpu, requests.cpuSeen ? requests.cpu : 0),
+        mem: metrics.available ? formatMemBytes(usage?.memBytes) : undefined,
         memColor: usageColor(memPct),
+        memSpark: trendSpark(hist?.mem, requests.memSeen ? requests.mem : 0),
       };
     });
   }
 
-  /** Appends a trend sparkline once at least 2 samples exist; otherwise just the value. */
-  function withTrend(value: string, samples: number[] | undefined): string {
-    if (!samples || samples.length < 2) return value;
-    return `${value} ${sparkline(samples)}`;
+  /** Renders a trend sparkline capped to SPARK_SAMPLES chars (the table
+   * reserves exactly that much room) once at least 2 samples exist. Bars are
+   * sized/colored by percent of `referenceTotal` (a request/allocatable
+   * total) when known, rather than the window's own max — see usageSpark(). */
+  function trendSpark(samples: number[] | undefined, referenceTotal: number) {
+    if (!samples || samples.length < 2) return undefined;
+    return usageSpark(samples.slice(-SPARK_SAMPLES), referenceTotal);
   }
 
   function buildDeploymentRows(): ResourceRow[] {
@@ -384,14 +386,12 @@ export function App({ mutationsEnabled, maxReplicas }: AppProps) {
         extra3: pressure
           ? `⚠ ${pressure}`
           : (n.status?.nodeInfo?.osImage ?? "").slice(0, 20),
-        cpu: metrics.available
-          ? withTrend(formatCpu(usage?.cpuMillicores), hist?.cpu)
-          : undefined,
+        cpu: metrics.available ? formatCpu(usage?.cpuMillicores) : undefined,
         cpuColor: usageColor(cpuPct),
-        mem: metrics.available
-          ? withTrend(formatMemBytes(usage?.memBytes), hist?.mem)
-          : undefined,
+        cpuSpark: trendSpark(hist?.cpu, allocCpu ?? 0),
+        mem: metrics.available ? formatMemBytes(usage?.memBytes) : undefined,
         memColor: usageColor(memPct),
+        memSpark: trendSpark(hist?.mem, allocMem ?? 0),
       };
     });
   }
@@ -496,24 +496,24 @@ export function App({ mutationsEnabled, maxReplicas }: AppProps) {
     pvcs.loading,
   ];
 
+  // Every detail/overlay view (PodDetail, DeploymentDetail, ScaleModal,
+  // MultiPodLogView, ContextSwitcher, NamespacePicker, ConfirmModal) already
+  // shows its own hint text internally, so the global footer below is only
+  // relevant for the plain resource-table browsing view — showing it during
+  // an overlay would just duplicate (and risk drifting out of sync with)
+  // hints that view already displays.
+  const showGlobalFooter =
+    !detailPod &&
+    !detailDeployment &&
+    !scaleTarget &&
+    !multiPodView &&
+    !showContextSwitcher &&
+    !showNamespacePicker &&
+    !pendingMutation;
+
   function getFooterHints(): string {
-    if (showContextSwitcher || showNamespacePicker || pendingMutation) {
-      return "[↑↓] Navigate  [Enter] Select  [Esc] Cancel";
-    }
-    if (detailPod) {
-      return "[↑↓] Scroll  [[] []] Container  [f] Follow  [/] Search  [h] Restarts  [e] Export  [Esc] Close";
-    }
-    if (detailDeployment) {
-      return "[↑↓] Nav  [r/Enter] Rollback  [Esc] Close";
-    }
-    if (scaleTarget) {
-      return "[↑/+] Increase  [↓/-] Decrease  [Enter] Confirm  [Esc] Cancel";
-    }
-    if (multiPodView) {
-      return "[↑↓] Scroll  [Esc] Close";
-    }
     const nsLabel = activeNamespace === "all" ? "all" : activeNamespace;
-    const base = `[↑↓] Nav  [Tab] Switch  [/] Search  [c] Context  [n] NS:${nsLabel}  [q] Quit`;
+    const base = `[↑↓] Nav  [Tab] Switch  [/] Search  [*] Favourite  [c] Context  [n] NS:${nsLabel}  [q] Quit`;
     if (activeTab === 0) {
       return mutationsEnabled
         ? base + "  [Space] Select  [Enter] Detail  [d] Delete  [D] Force-del"
@@ -579,40 +579,6 @@ export function App({ mutationsEnabled, maxReplicas }: AppProps) {
         tabSummaries={tabSummaries}
       />
 
-      {/* Status summary bar — hidden when overlay/detail is active */}
-      {!detailPod &&
-        !multiPodView &&
-        !showContextSwitcher &&
-        !pendingMutation && (
-          <Box paddingX={1}>
-            {(() => {
-              const rows = tabRows[activeTab];
-              const total = rows.length;
-              const critical = rows.filter(
-                (r) => r.status === HealthStatus.Critical,
-              ).length;
-              const degraded = rows.filter(
-                (r) => r.status === HealthStatus.Degraded,
-              ).length;
-              const healthy = rows.filter(
-                (r) => r.status === HealthStatus.Healthy,
-              ).length;
-              return (
-                <>
-                  <Text dimColor>{total} total </Text>
-                  {critical > 0 && (
-                    <Text color="red">{critical} ● critical </Text>
-                  )}
-                  {degraded > 0 && (
-                    <Text color="yellow">{degraded} ● degraded </Text>
-                  )}
-                  <Text color="green">{healthy} ● healthy</Text>
-                </>
-              );
-            })()}
-          </Box>
-        )}
-
       {/* Main content */}
       <Box flexGrow={1} paddingX={1}>
         {multiPodView ? (
@@ -621,6 +587,7 @@ export function App({ mutationsEnabled, maxReplicas }: AppProps) {
               selectedPodUids.has(p.metadata?.uid ?? ""),
             )}
             kubeConfig={kubeClient.kubeConfig}
+            maxHeight={contentMaxHeight}
             onClose={() => {
               setMultiPodView(false);
               setSelectedPodUids(new Set());
@@ -632,6 +599,10 @@ export function App({ mutationsEnabled, maxReplicas }: AppProps) {
             kubeConfig={kubeClient.kubeConfig}
             onClose={() => setDetailPod(null)}
             restartHistory={restartHistory}
+            metricsHistory={metrics.podHistory.get(
+              `${detailPod.metadata?.namespace ?? ""}/${detailPod.metadata?.name ?? ""}`,
+            )}
+            maxHeight={contentMaxHeight}
           />
         ) : detailDeployment ? (
           <DeploymentDetail
@@ -775,17 +746,19 @@ export function App({ mutationsEnabled, maxReplicas }: AppProps) {
         )}
       </Box>
 
-      {/* Footer */}
-      <Box
-        paddingX={1}
-        borderStyle="single"
-        borderTop={true}
-        borderBottom={false}
-        borderLeft={false}
-        borderRight={false}
-      >
-        <Text dimColor>{getFooterHints()}</Text>
-      </Box>
+      {/* Footer — only for the resource-table view; overlays show their own hints */}
+      {showGlobalFooter && (
+        <Box
+          paddingX={1}
+          borderStyle="single"
+          borderTop={true}
+          borderBottom={false}
+          borderLeft={false}
+          borderRight={false}
+        >
+          <Text dimColor>{getFooterHints()}</Text>
+        </Box>
+      )}
     </Box>
   );
 }

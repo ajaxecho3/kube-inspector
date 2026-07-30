@@ -26,8 +26,11 @@ export interface UseMetricsResult {
   available: boolean | null;
 }
 
-const POLL_INTERVAL_MS = 15_000;
-const MAX_HISTORY_SAMPLES = 20;
+export const POLL_INTERVAL_MS = 15_000;
+// 1 hour of history at the poll interval above (3600s / 15s). The inline
+// table sparkline only ever looks at the most recent 8 samples regardless,
+// so this only affects how far back the pod-detail usage graph can scroll.
+export const MAX_HISTORY_SAMPLES = 240;
 const METRICS_GROUP = "metrics.k8s.io";
 const METRICS_VERSION = "v1beta1";
 

@@ -6,6 +6,8 @@ import * as os from "node:os";
 import type { V1Pod, KubeConfig } from "@kubernetes/client-node";
 import type { RestartHistory } from "../hooks/useRestartHistory.js";
 import { RestartGraph } from "./RestartGraph.js";
+import { UsageGraph } from "./UsageGraph.js";
+import type { MetricHistory } from "../hooks/useMetrics.js";
 import { useLogStream } from "../hooks/useLogStream.js";
 import { formatAge } from "../utils/format.js";
 import { SplitLogView } from "./SplitLogView.js";
@@ -47,9 +49,15 @@ interface PodDetailProps {
   kubeConfig: KubeConfig;
   onClose: () => void;
   restartHistory?: RestartHistory;
+  /** This pod's CPU/mem sample history, for the usage-history graph ('u'). */
+  metricsHistory?: MetricHistory;
+  /** Rows actually available to this view (terminal height minus the header/
+   * tabs/alert-banner chrome that still renders above it). Falls back to the
+   * raw terminal height if not provided. */
+  maxHeight?: number;
 }
 
-export function PodDetail({ pod, kubeConfig, onClose, restartHistory }: PodDetailProps) {
+export function PodDetail({ pod, kubeConfig, onClose, restartHistory, metricsHistory, maxHeight }: PodDetailProps) {
   const { stdout } = useStdout();
   const namespace = pod.metadata?.namespace ?? "default";
   const podName   = pod.metadata?.name ?? "";
@@ -61,6 +69,7 @@ export function PodDetail({ pod, kubeConfig, onClose, restartHistory }: PodDetai
   const [follow,          setFollow]          = useState(true);
   const [splitMode,       setSplitMode]       = useState(false);
   const [showRestartGraph, setShowRestartGraph] = useState(false);
+  const [showUsageGraph, setShowUsageGraph] = useState(false);
 
   // ── Export state ───────────────────────────────────────────────────────────
   const [exportMsg, setExportMsg] = useState<string | null>(null);
@@ -102,10 +111,15 @@ export function PodDetail({ pod, kubeConfig, onClose, restartHistory }: PodDetai
     setScrollOffset(0);
   }, [containerName, isCrashLoop]);
 
-  // Chrome: title(1) + meta(1) + labels(1) + containers(capped 4) + log-header(1)
-  //       + hint-row-1(1) + hint-row-2(1) + round-border(2) + 2 inner borders(2) = 14 + containers
-  const CHROME   = 14 + Math.min(containers.length, 4);
-  const logLines = Math.max(5, (stdout?.rows ?? 30) - CHROME);
+  // Chrome: title(1) + meta(1) + labels(1) + log-header(1, includes hints + status)
+  //       + round-border(2) + inner-border(1, containers box) = 7, plus 1 row
+  //       per container shown (capped at 4). Previously this constant also
+  //       baked a worst-case "4" into itself while separately adding
+  //       Math.min(containers.length, 4) again — double-counting container
+  //       rows and needlessly shrinking the visible log area.
+  const CHROME   = 7 + Math.min(containers.length, 4);
+  const availableRows = maxHeight ?? stdout?.rows ?? 30;
+  const logLines = Math.max(5, availableRows - CHROME);
 
   // ── Log stream ─────────────────────────────────────────────────────────────
   const { lines, error: logError } = useLogStream(
@@ -277,6 +291,9 @@ export function PodDetail({ pod, kubeConfig, onClose, restartHistory }: PodDetai
 
       // #5 — Restart history graph
       if (input === "h") setShowRestartGraph((v) => !v);
+
+      // Usage (CPU/mem) history graph
+      if (input === "u") setShowUsageGraph((v) => !v);
     }
   });
 
@@ -370,6 +387,18 @@ export function PodDetail({ pod, kubeConfig, onClose, restartHistory }: PodDetai
     );
   }
 
+  // Show CPU/mem usage history overlay
+  if (showUsageGraph) {
+    return (
+      <UsageGraph
+        pod={pod}
+        history={metricsHistory}
+        onClose={() => setShowUsageGraph(false)}
+        maxHeight={maxHeight}
+      />
+    );
+  }
+
   return (
     <Box flexDirection="column" borderStyle="round" borderColor={isCrashLoop ? "red" : "cyan"} flexGrow={1}>
       {/* Title bar */}
@@ -386,7 +415,7 @@ export function PodDetail({ pod, kubeConfig, onClose, restartHistory }: PodDetai
           {containers.length > 1 && (
             <Text dimColor>[m] {splitMode ? "single" : "split"} logs </Text>
           )}
-          <Text dimColor>[h] history  [e] export  [esc] close</Text>
+          <Text dimColor>[u] Usage  [h] History  [e] Export  [Esc] Close</Text>
         </Box>
       </Box>
 
@@ -413,8 +442,9 @@ export function PodDetail({ pod, kubeConfig, onClose, restartHistory }: PodDetai
         </Box>
       )}
 
-      {/* Metadata row */}
-      <Box paddingX={1} borderStyle="single" borderTop={false} borderLeft={false} borderRight={false} borderBottom={true}>
+      {/* Metadata row — no border here; the containers box below already
+          provides the single visual break before the log section */}
+      <Box paddingX={1}>
         <Text color={phaseColor}>● {phase} </Text>
         <Text dimColor>IP: </Text><Text>{podIP} </Text>
         <Text dimColor>Node: </Text>
@@ -463,12 +493,12 @@ export function PodDetail({ pod, kubeConfig, onClose, restartHistory }: PodDetai
         <>
           <SplitLogView pod={pod} kubeConfig={kubeConfig} logLevel={logLevel} />
           <Box paddingX={1}>
-            <Text dimColor>[m] single mode  [Esc] close — all containers auto-follow</Text>
+            <Text dimColor>[m] Single Mode  [Esc] Close — all containers auto-follow</Text>
           </Box>
         </>
       ) : (
         <Box flexDirection="column" flexGrow={1}>
-          {/* Log header */}
+          {/* Log header — title/badges, key hints, and live status all on one line */}
           <Box paddingX={1} justifyContent="space-between">
             {logSearchMode ? (
               <Box>
@@ -488,6 +518,10 @@ export function PodDetail({ pod, kubeConfig, onClose, restartHistory }: PodDetai
                 {badges}
               </Box>
             )}
+            <Text dimColor>
+              [↑↓][g/G] Scroll  [f] Follow  [/] Search  [r] Regex  [l] Level  [t] Timestamps  [w] Wrap  [s] Since  [p] Prev  [+/-] Tail({tailLines})
+              {containers.length > 1 ? "  [[] []] Ctr" : ""}
+            </Text>
             <Box>
               {showPrevious ? (
                 <Text color="magenta">◀ previous</Text>
@@ -528,17 +562,6 @@ export function PodDetail({ pod, kubeConfig, onClose, restartHistory }: PodDetai
               </Text>
             )}
             {visibleLines.map((dl, i) => renderLine(dl, effectiveOffset + i))}
-          </Box>
-
-          {/* Hint footer — two compact rows */}
-          <Box flexDirection="column" paddingX={1}>
-            <Text dimColor>
-              [↑↓][g/G] Scroll  [f] Follow  [/] Search  [r] Regex({regexMode ? "ON" : "off"})  [l] Level({logLevel})  [Esc] Close
-            </Text>
-            <Text dimColor>
-              [t] Timestamps({showTimestamps ? "ON" : "off"})  [w] Wrap({wrapLines ? "ON" : "off"})  [s] Since({sinceOption !== undefined ? `${sinceOption}m` : "all"})  [p] Prev({showPrevious ? "ON" : "off"})  [+/-] Tail({tailLines})  [e] Export  [h] Restarts
-              {containers.length > 1 ? "  [[] []] Ctr" : ""}
-            </Text>
           </Box>
         </Box>
       )}

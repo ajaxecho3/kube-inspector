@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { sparkline } from "../../src/utils/sparkline";
+import { sparkline, charForRatio } from "../../src/utils/sparkline";
 
 describe("sparkline", () => {
   it("returns a placeholder for an empty series", () => {
@@ -22,5 +22,30 @@ describe("sparkline", () => {
 
   it("is stable for a flat non-zero series", () => {
     expect(sparkline([5, 5, 5])).toBe("███");
+  });
+});
+
+describe("charForRatio", () => {
+  it("returns the lowest block at ratio 0", () => {
+    expect(charForRatio(0)).toBe("▁");
+  });
+
+  it("returns the tallest block at ratio 1", () => {
+    expect(charForRatio(1)).toBe("█");
+  });
+
+  it("clamps out-of-range ratios", () => {
+    expect(charForRatio(-1)).toBe(charForRatio(0));
+    expect(charForRatio(2)).toBe(charForRatio(1));
+  });
+
+  it("is monotonic across the 0..1 range", () => {
+    const chars = "▁▂▃▄▅▆▇█";
+    let lastIndex = -1;
+    for (let i = 0; i <= 10; i++) {
+      const idx = chars.indexOf(charForRatio(i / 10));
+      expect(idx).toBeGreaterThanOrEqual(lastIndex);
+      lastIndex = idx;
+    }
   });
 });

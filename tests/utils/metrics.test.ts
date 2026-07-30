@@ -5,6 +5,8 @@ import {
   formatCpu,
   formatMemBytes,
   usageColor,
+  brighten,
+  usageSpark,
 } from "../../src/utils/metrics";
 
 describe("parseCpuToMillicores", () => {
@@ -93,5 +95,44 @@ describe("usageColor", () => {
   it("returns undefined when percent is unknown", () => {
     expect(usageColor(null)).toBeUndefined();
     expect(usageColor(undefined)).toBeUndefined();
+  });
+});
+
+describe("brighten", () => {
+  it("appends Bright to a resolved color name", () => {
+    expect(brighten("green")).toBe("greenBright");
+    expect(brighten("yellow")).toBe("yellowBright");
+    expect(brighten("red")).toBe("redBright");
+  });
+
+  it("returns undefined when there is no color to brighten", () => {
+    expect(brighten(undefined)).toBeUndefined();
+  });
+});
+
+describe("usageSpark", () => {
+  it("returns undefined with fewer than 2 samples", () => {
+    expect(usageSpark(undefined, 1000)).toBeUndefined();
+    expect(usageSpark([500], 1000)).toBeUndefined();
+  });
+
+  it("colors a flat series near its request as a steady, non-orange trend", () => {
+    // Regression guard: a stable series must NOT render as "maxed out" just
+    // because it's flat — every bar should reflect its real (low) percent.
+    const segs = usageSpark([50, 52, 48, 51, 50], 1000)!;
+    expect(segs.every((s) => s.color === "green")).toBe(true);
+  });
+
+  it("colors each bar by its own percent of the reference total", () => {
+    const segs = usageSpark([100, 700, 950], 1000)!;
+    expect(segs[0].color).toBe("green"); // 10%
+    expect(segs[1].color).toBe("yellow"); // 70%
+    expect(segs[2].color).toBe("red"); // 95%
+  });
+
+  it("falls back to an uncolored window-relative trend with no reference total", () => {
+    const segs = usageSpark([1, 5, 10], 0)!;
+    expect(segs.every((s) => s.color === undefined)).toBe(true);
+    expect(segs.at(-1)!.char).toBe("█");
   });
 });
