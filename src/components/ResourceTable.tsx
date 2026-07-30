@@ -13,6 +13,12 @@ export interface ResourceRow {
   extra?: string;
   extra2?: string;
   extra3?: string;
+  /** Formatted CPU usage, e.g. "120m" or "1.20" — from metrics-server, when available */
+  cpu?: string;
+  cpuColor?: string;
+  /** Formatted memory usage, e.g. "256 MiB" — from metrics-server, when available */
+  mem?: string;
+  memColor?: string;
 }
 
 interface ResourceTableProps {
@@ -22,6 +28,8 @@ interface ResourceTableProps {
   onActivate: (row: ResourceRow) => void;
   selectedUids?: Set<string>;
   onToggleSelect?: (row: ResourceRow) => void;
+  favouriteUids?: Set<string>;
+  onToggleFavourite?: (row: ResourceRow) => void;
   maxHeight?: number;
   mutationsEnabled: boolean;
   loading?: boolean;
@@ -32,6 +40,10 @@ interface ResourceTableProps {
 }
 
 const COL_AGE = 6;
+// Wide enough for "<value> <8-char sparkline>", e.g. "1.50 ▂▃▅▅▆▇██"
+const COL_CPU = 14;
+const COL_MEM = 18;
+const METRICS_MIN_WIDTH = 130;
 
 const STATUS_LABEL: Record<HealthStatus, string> = {
   [HealthStatus.Healthy]: "● Healthy ",
@@ -49,16 +61,22 @@ function padEnd(str: string, len: number): string {
   return str.length >= len ? str.slice(0, len - 1) + " " : str.padEnd(len);
 }
 
-function computeColumns(terminalWidth: number): {
+function computeColumns(
+  terminalWidth: number,
+  hasMetrics: boolean,
+): {
   colName: number;
   colNs: number;
   colExtra: number;
   colExtra2: number;
   colExtra3: number;
   showExtra3: boolean;
+  showMetrics: boolean;
 } {
+  const showMetrics = hasMetrics && terminalWidth >= METRICS_MIN_WIDTH;
   // Reserve: checkbox(2) + status(12) + age(6) + paddingX(2) + gaps(4) = 26
-  const available = Math.max(60, terminalWidth) - 26;
+  const metricsReserve = showMetrics ? COL_CPU + COL_MEM + 2 : 0;
+  const available = Math.max(60, terminalWidth) - 26 - metricsReserve;
   const showExtra3 = terminalWidth >= 100;
   if (showExtra3) {
     // Distribute all available space across 4 variable columns
@@ -70,13 +88,29 @@ function computeColumns(terminalWidth: number): {
       10,
       available - colName - colNs - colExtra - colExtra2,
     );
-    return { colName, colNs, colExtra, colExtra2, colExtra3, showExtra3 };
+    return {
+      colName,
+      colNs,
+      colExtra,
+      colExtra2,
+      colExtra3,
+      showExtra3,
+      showMetrics,
+    };
   } else {
     const colName = Math.max(24, Math.floor(available * 0.4));
     const colNs = Math.max(14, Math.floor(available * 0.22));
     const colExtra = Math.max(12, Math.floor(available * 0.23));
     const colExtra2 = Math.max(10, available - colName - colNs - colExtra);
-    return { colName, colNs, colExtra, colExtra2, colExtra3: 0, showExtra3 };
+    return {
+      colName,
+      colNs,
+      colExtra,
+      colExtra2,
+      colExtra3: 0,
+      showExtra3,
+      showMetrics,
+    };
   }
 }
 
@@ -137,8 +171,16 @@ export function ResourceTable({
   extra3Label = "MORE",
 }: ResourceTableProps) {
   const { stdout } = useStdout();
-  const { colName, colNs, colExtra, colExtra2, colExtra3, showExtra3 } =
-    computeColumns(stdout?.columns ?? 120);
+  const hasMetrics = rows.some((r) => r.cpu !== undefined || r.mem !== undefined);
+  const {
+    colName,
+    colNs,
+    colExtra,
+    colExtra2,
+    colExtra3,
+    showExtra3,
+    showMetrics,
+  } = computeColumns(stdout?.columns ?? 120, hasMetrics);
   const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
   const [spinnerFrame, setSpinnerFrame] = useState(0);
 
@@ -344,6 +386,8 @@ export function ResourceTable({
           {padEnd(extraLabel, colExtra)}
           {padEnd(extra2Label, colExtra2)}
           {showExtra3 ? padEnd(extra3Label, colExtra3) : ""}
+          {showMetrics ? padEnd("CPU", COL_CPU) : ""}
+          {showMetrics ? padEnd("MEM", COL_MEM) : ""}
         </Text>
       </Box>
 
@@ -464,6 +508,26 @@ export function ResourceTable({
               >
                 {padEnd(row.extra3 ?? "", colExtra3)}
               </Text>
+            )}
+
+            {/* CPU / MEM usage — only when metrics-server data is present */}
+            {showMetrics && (
+              <>
+                <Text
+                  inverse={isSelected}
+                  color={isSelected ? "cyan" : row.cpuColor}
+                  dimColor={!isSelected && !row.cpuColor}
+                >
+                  {padEnd(row.cpu ?? "–", COL_CPU)}
+                </Text>
+                <Text
+                  inverse={isSelected}
+                  color={isSelected ? "cyan" : row.memColor}
+                  dimColor={!isSelected && !row.memColor}
+                >
+                  {padEnd(row.mem ?? "–", COL_MEM)}
+                </Text>
+              </>
             )}
           </Box>
         );

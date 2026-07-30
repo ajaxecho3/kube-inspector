@@ -18,11 +18,13 @@ import { NamespacePicker } from "./components/NamespacePicker.js";
 import { PodDetail } from "./components/PodDetail.js";
 import { MultiPodLogView } from "./components/MultiPodLogView.js";
 import { DeploymentDetail } from "./components/DeploymentDetail.js";
+import { ScaleModal } from "./components/ScaleModal.js";
 import { useKubeClient } from "./hooks/useKubeClient.js";
 import { useResources } from "./hooks/useResources.js";
 import { useAlerts } from "./hooks/useAlerts.js";
 import { useFavourites } from "./hooks/useFavourites.js";
 import { useRestartHistory } from "./hooks/useRestartHistory.js";
+import { useMetrics } from "./hooks/useMetrics.js";
 import {
   podHealth,
   deploymentHealth,
@@ -32,6 +34,14 @@ import {
   HealthStatus,
 } from "./utils/health.js";
 import { mutate, MutationAction } from "./utils/mutate.js";
+import {
+  formatCpu,
+  formatMemBytes,
+  usageColor,
+  parseCpuToMillicores,
+  parseMemoryToBytes,
+} from "./utils/metrics.js";
+import { sparkline } from "./utils/sparkline.js";
 
 const PROTECTED_NAMESPACES = new Set(["production", "prod", "kube-system"]);
 
@@ -54,6 +64,7 @@ export function App({ mutationsEnabled, maxReplicas }: AppProps) {
   );
   const [multiPodView, setMultiPodView] = useState(false);
   const [detailDeployment, setDetailDeployment] = useState<V1Deployment | null>(null);
+  const [scaleTarget, setScaleTarget] = useState<V1Deployment | null>(null);
   const [pendingMutation, setPendingMutation] = useState<null | {
     title: string;
     description: string;
@@ -99,11 +110,13 @@ export function App({ mutationsEnabled, maxReplicas }: AppProps) {
   const getPodHealth = useCallback((pod: V1Pod) => podHealth(pod), []);
   const { alerts, dismiss } = useAlerts(pods.resources, getPodHealth);
   const restartHistory = useRestartHistory(pods.resources);
+  const metrics = useMetrics(kubeClient.kubeConfig);
 
   // Dynamic chrome: accounts for whether summary bar and alert banner are currently rendered
   const isOverlay =
     !!detailPod ||
     !!detailDeployment ||
+    !!scaleTarget ||
     multiPodView ||
     showContextSwitcher ||
     showNamespacePicker ||
@@ -125,6 +138,7 @@ export function App({ mutationsEnabled, maxReplicas }: AppProps) {
       showNamespacePicker ||
       detailPod ||
       detailDeployment ||
+      scaleTarget ||
       multiPodView
     )
       return;
@@ -172,27 +186,31 @@ export function App({ mutationsEnabled, maxReplicas }: AppProps) {
           });
         }
       }
+    }
 
-      if (activeTab === 1) {
-        const deployArr = Array.from(deployments.resources.values());
-        const deploy = deployArr[selectedIndex];
-        if (!deploy) return;
-        const name = deploy.metadata?.name ?? "";
-        const ns = deploy.metadata?.namespace ?? "";
+    if (activeTab === 1) {
+      const deployArr = Array.from(deployments.resources.values());
+      const deploy = deployArr[selectedIndex];
+      if (!deploy) return;
+      const name = deploy.metadata?.name ?? "";
+      const ns = deploy.metadata?.namespace ?? "";
 
-        if (mutationsEnabled && input === "R") {
-          setPendingMutation({
-            title: "Confirm Restart",
-            description: `Rollout restart deployment "${name}" in namespace "${ns}"?`,
-            namespace: ns,
-            action: () =>
-              mutate(kubeClient.appsV1 as any, {
-                action: MutationAction.RestartDeployment,
-                name,
-                namespace: ns,
-              }),
-          });
-        }
+      if (mutationsEnabled && input === "R") {
+        setPendingMutation({
+          title: "Confirm Restart",
+          description: `Rollout restart deployment "${name}" in namespace "${ns}"?`,
+          namespace: ns,
+          action: () =>
+            mutate(kubeClient.appsV1 as any, {
+              action: MutationAction.RestartDeployment,
+              name,
+              namespace: ns,
+            }),
+        });
+      }
+
+      if (mutationsEnabled && input === "s") {
+        setScaleTarget(deploy);
       }
     }
   });
@@ -211,6 +229,36 @@ export function App({ mutationsEnabled, maxReplicas }: AppProps) {
       const phase = pod.status?.phase ?? "Unknown";
       const restarts = cs.reduce((sum, s) => sum + (s.restartCount ?? 0), 0);
       const node = (pod.spec?.nodeName ?? "").slice(0, 18);
+
+      const metricKey = `${pod.metadata?.namespace ?? ""}/${pod.metadata?.name ?? ""}`;
+      const usage = metrics.podMetrics.get(metricKey);
+      // Percentage against the pod's own requested resources, when set —
+      // otherwise show raw usage with no color (nothing to compare against).
+      const requests = (pod.spec?.containers ?? []).reduce(
+        (sum, c) => {
+          const cpuReq = c.resources?.requests?.["cpu"];
+          const memReq = c.resources?.requests?.["memory"];
+          const cpuMilli = cpuReq ? parseCpuToMillicores(cpuReq) : null;
+          const memB = memReq ? parseMemoryToBytes(memReq) : null;
+          return {
+            cpu: sum.cpu + (cpuMilli ?? 0),
+            mem: sum.mem + (memB ?? 0),
+            cpuSeen: sum.cpuSeen || cpuMilli !== null,
+            memSeen: sum.memSeen || memB !== null,
+          };
+        },
+        { cpu: 0, mem: 0, cpuSeen: false, memSeen: false },
+      );
+      const cpuPct =
+        usage?.cpuMillicores != null && requests.cpuSeen && requests.cpu > 0
+          ? (usage.cpuMillicores / requests.cpu) * 100
+          : null;
+      const memPct =
+        usage?.memBytes != null && requests.memSeen && requests.mem > 0
+          ? (usage.memBytes / requests.mem) * 100
+          : null;
+      const hist = metrics.podHistory.get(metricKey);
+
       return {
         uid: pod.metadata?.uid ?? "",
         name: pod.metadata?.name ?? "",
@@ -220,8 +268,22 @@ export function App({ mutationsEnabled, maxReplicas }: AppProps) {
         extra: `${phase} ${readyCount}/${cs.length || "?"}`,
         extra2: restarts > 0 ? `↺${restarts}  ${node}` : node,
         extra3: pod.status?.podIP ?? "",
+        cpu: metrics.available
+          ? withTrend(formatCpu(usage?.cpuMillicores), hist?.cpu)
+          : undefined,
+        cpuColor: usageColor(cpuPct),
+        mem: metrics.available
+          ? withTrend(formatMemBytes(usage?.memBytes), hist?.mem)
+          : undefined,
+        memColor: usageColor(memPct),
       };
     });
+  }
+
+  /** Appends a trend sparkline once at least 2 samples exist; otherwise just the value. */
+  function withTrend(value: string, samples: number[] | undefined): string {
+    if (!samples || samples.length < 2) return value;
+    return `${value} ${sparkline(samples)}`;
   }
 
   function buildDeploymentRows(): ResourceRow[] {
@@ -297,6 +359,20 @@ export function App({ mutationsEnabled, maxReplicas }: AppProps) {
           .join(",") || "worker";
       const version = n.status?.nodeInfo?.kubeletVersion ?? "";
       const pressure = nodePressureLabel(n);
+
+      const usage = metrics.nodeMetrics.get(n.metadata?.name ?? "");
+      const allocCpu = parseCpuToMillicores(n.status?.allocatable?.["cpu"]);
+      const allocMem = parseMemoryToBytes(n.status?.allocatable?.["memory"]);
+      const cpuPct =
+        usage?.cpuMillicores != null && allocCpu
+          ? (usage.cpuMillicores / allocCpu) * 100
+          : null;
+      const memPct =
+        usage?.memBytes != null && allocMem
+          ? (usage.memBytes / allocMem) * 100
+          : null;
+      const hist = metrics.nodeHistory.get(n.metadata?.name ?? "");
+
       return {
         uid: n.metadata?.uid ?? "",
         name: n.metadata?.name ?? "",
@@ -308,6 +384,14 @@ export function App({ mutationsEnabled, maxReplicas }: AppProps) {
         extra3: pressure
           ? `⚠ ${pressure}`
           : (n.status?.nodeInfo?.osImage ?? "").slice(0, 20),
+        cpu: metrics.available
+          ? withTrend(formatCpu(usage?.cpuMillicores), hist?.cpu)
+          : undefined,
+        cpuColor: usageColor(cpuPct),
+        mem: metrics.available
+          ? withTrend(formatMemBytes(usage?.memBytes), hist?.mem)
+          : undefined,
+        memColor: usageColor(memPct),
       };
     });
   }
@@ -422,6 +506,9 @@ export function App({ mutationsEnabled, maxReplicas }: AppProps) {
     if (detailDeployment) {
       return "[↑↓] Nav  [r/Enter] Rollback  [Esc] Close";
     }
+    if (scaleTarget) {
+      return "[↑/+] Increase  [↓/-] Decrease  [Enter] Confirm  [Esc] Cancel";
+    }
     if (multiPodView) {
       return "[↑↓] Scroll  [Esc] Close";
     }
@@ -466,7 +553,10 @@ export function App({ mutationsEnabled, maxReplicas }: AppProps) {
         </Text>
         <Box>
           <Text dimColor>context: {kubeClient.currentContext} </Text>
-          <Text dimColor>ns: {activeNamespace}</Text>
+          <Text dimColor>ns: {activeNamespace} </Text>
+          {metrics.available === false && (
+            <Text dimColor>(metrics-server not found) </Text>
+          )}
         </Box>
         <Text color={connectionError ? "yellow" : "green"}>
           {connectionError ? "⚠ reconnecting..." : "● connected"}
@@ -593,6 +683,35 @@ export function App({ mutationsEnabled, maxReplicas }: AppProps) {
               setSelectedIndex(0);
             }}
             onClose={() => setShowNamespacePicker(false)}
+          />
+        ) : scaleTarget ? (
+          <ScaleModal
+            name={scaleTarget.metadata?.name ?? ""}
+            namespace={scaleTarget.metadata?.namespace ?? ""}
+            currentReplicas={scaleTarget.spec?.replicas ?? 0}
+            maxReplicas={maxReplicas}
+            isProduction={PROTECTED_NAMESPACES.has(
+              scaleTarget.metadata?.namespace ?? "",
+            )}
+            onConfirm={(replicas) => {
+              const name = scaleTarget.metadata?.name ?? "";
+              const ns = scaleTarget.metadata?.namespace ?? "";
+              setScaleTarget(null);
+              setPendingMutation({
+                title: "Confirm Scale",
+                description: `Scale deployment "${name}" in namespace "${ns}" to ${replicas} replica${replicas === 1 ? "" : "s"}?`,
+                namespace: ns,
+                action: () =>
+                  mutate(kubeClient.appsV1 as any, {
+                    action: MutationAction.ScaleDeployment,
+                    name,
+                    namespace: ns,
+                    replicas,
+                    maxReplicas,
+                  }),
+              });
+            }}
+            onCancel={() => setScaleTarget(null)}
           />
         ) : pendingMutation ? (
           <ConfirmModal

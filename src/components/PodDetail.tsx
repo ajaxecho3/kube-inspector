@@ -155,6 +155,14 @@ export function PodDetail({ pod, kubeConfig, onClose, restartHistory }: PodDetai
     : Math.min(scrollOffset, maxOffset);
   const visibleLines   = displayLines.slice(effectiveOffset, effectiveOffset + logLines);
 
+  // Keep scrollOffset pinned to the live bottom while following, so the
+  // first manual scroll (↑) after opening/streaming moves up by one line
+  // from where the view actually is — instead of jumping from a stale
+  // scrollOffset (e.g. 0, from before any lines had arrived).
+  useEffect(() => {
+    if (follow) setScrollOffset(maxOffset);
+  }, [follow, maxOffset]);
+
   const scrollPercent =
     displayLines.length <= logLines
       ? 100
