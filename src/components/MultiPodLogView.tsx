@@ -146,18 +146,24 @@ export interface MultiPodLogViewProps {
   pods: V1Pod[];
   kubeConfig: KubeConfig;
   onClose: () => void;
+  /** Rows actually available to this view (terminal height minus the
+   * header/tabs/alert-banner chrome that still renders above it). Falls
+   * back to the raw terminal height if not provided. */
+  maxHeight?: number;
 }
 
 export function MultiPodLogView({
   pods,
   kubeConfig,
   onClose,
+  maxHeight,
 }: MultiPodLogViewProps) {
   const { stdout } = useStdout();
   const [focusedIndex, setFocusedIndex] = useState(0);
   const [logLevel, setLogLevel] = useState<LogLevel>("ALL");
 
-  const tailLines = Math.max(5, (stdout?.rows ?? 24) - PANE_CHROME);
+  const availableRows = maxHeight ?? stdout?.rows ?? 24;
+  const tailLines = Math.max(5, availableRows - PANE_CHROME);
 
   useInput((input, key) => {
     if (key.escape) {
@@ -191,7 +197,7 @@ export function MultiPodLogView({
             </Text>
           )}
         </Box>
-        <Text dimColor>[←→/h/l] focus  [↑↓] scroll  [L] level ({logLevel})  [Esc] back</Text>
+        <Text dimColor>[←→/h/l] Focus  [↑↓] Scroll  [L] Level ({logLevel})  [Esc] Back</Text>
       </Box>
 
       {/* Panes */}

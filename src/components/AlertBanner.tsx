@@ -24,13 +24,15 @@ export function AlertBanner({
   });
 
   return (
-    <Box borderStyle="round" borderColor="red" paddingX={1}>
-      <Text color="red" bold>
-        ⚠ ALERT:{" "}
+    <Box paddingX={1}>
+      <Text backgroundColor="red" color="white" bold>
+        {" "}⚠ ALERT{" "}
       </Text>
-      <Text>{message}</Text>
+      <Text color="red" bold>
+        {" "}{message}
+      </Text>
       <Text dimColor>
-        {" [Esc] dismiss"}
+        {" [Esc] Dismiss"}
         {queueLength > 1 ? `  (+${queueLength - 1} more)` : ""}
       </Text>
     </Box>

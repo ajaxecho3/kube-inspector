@@ -10,7 +10,11 @@ import type {
   V1PersistentVolumeClaim,
 } from "@kubernetes/client-node";
 import { NavTabs, TAB_LABELS } from "./components/NavTabs.js";
-import { ResourceTable, ResourceRow } from "./components/ResourceTable.js";
+import {
+  ResourceTable,
+  ResourceRow,
+  SPARK_SAMPLES,
+} from "./components/ResourceTable.js";
 import { AlertBanner } from "./components/AlertBanner.js";
 import { ConfirmModal } from "./components/ConfirmModal.js";
 import { ContextSwitcher } from "./components/ContextSwitcher.js";
@@ -18,11 +22,13 @@ import { NamespacePicker } from "./components/NamespacePicker.js";
 import { PodDetail } from "./components/PodDetail.js";
 import { MultiPodLogView } from "./components/MultiPodLogView.js";
 import { DeploymentDetail } from "./components/DeploymentDetail.js";
+import { ScaleModal } from "./components/ScaleModal.js";
 import { useKubeClient } from "./hooks/useKubeClient.js";
 import { useResources } from "./hooks/useResources.js";
 import { useAlerts } from "./hooks/useAlerts.js";
 import { useFavourites } from "./hooks/useFavourites.js";
 import { useRestartHistory } from "./hooks/useRestartHistory.js";
+import { useMetrics } from "./hooks/useMetrics.js";
 import {
   podHealth,
   deploymentHealth,
@@ -32,6 +38,14 @@ import {
   HealthStatus,
 } from "./utils/health.js";
 import { mutate, MutationAction } from "./utils/mutate.js";
+import {
+  formatCpu,
+  formatMemBytes,
+  usageColor,
+  usageSpark,
+  parseCpuToMillicores,
+  parseMemoryToBytes,
+} from "./utils/metrics.js";
 
 const PROTECTED_NAMESPACES = new Set(["production", "prod", "kube-system"]);
 
@@ -54,6 +68,7 @@ export function App({ mutationsEnabled, maxReplicas }: AppProps) {
   );
   const [multiPodView, setMultiPodView] = useState(false);
   const [detailDeployment, setDetailDeployment] = useState<V1Deployment | null>(null);
+  const [scaleTarget, setScaleTarget] = useState<V1Deployment | null>(null);
   const [pendingMutation, setPendingMutation] = useState<null | {
     title: string;
     description: string;
@@ -99,22 +114,21 @@ export function App({ mutationsEnabled, maxReplicas }: AppProps) {
   const getPodHealth = useCallback((pod: V1Pod) => podHealth(pod), []);
   const { alerts, dismiss } = useAlerts(pods.resources, getPodHealth);
   const restartHistory = useRestartHistory(pods.resources);
+  const metrics = useMetrics(kubeClient.kubeConfig);
 
-  // Dynamic chrome: accounts for whether summary bar and alert banner are currently rendered
-  const isOverlay =
-    !!detailPod ||
-    !!detailDeployment ||
-    multiPodView ||
-    showContextSwitcher ||
-    showNamespacePicker ||
-    !!pendingMutation;
-  const appChrome =
+  // Chrome that sits above the main content area in every view: header +
+  // tabs + alert banner. Detail/overlay views (PodDetail, MultiPodLogView,
+  // etc.) replace the table but still render below this same chrome, so
+  // they need this number too — otherwise they size themselves against the
+  // full terminal height and end up rendering more rows than actually fit,
+  // which Ink then has to squeeze/overlap.
+  const chromeAboveContent =
     1 + // header
     2 + // tabs (border line + content row)
-    (isOverlay ? 0 : 1) + // summary bar (hidden in overlays)
-    (alerts[0] ? 3 : 0) + // alert banner when visible (top border + content + bottom border)
-    2; // footer (border line + text)
-  const tableMaxHeight = Math.max(5, (stdout?.rows ?? 24) - appChrome);
+    (alerts[0] ? 1 : 0); // alert banner when visible (single line, no border)
+  const contentMaxHeight = Math.max(5, (stdout?.rows ?? 24) - chromeAboveContent);
+  // The table view additionally has the global footer below it.
+  const tableMaxHeight = Math.max(5, contentMaxHeight - 2);
 
   const connectionError = pods.error ?? deployments.error;
 
@@ -125,6 +139,7 @@ export function App({ mutationsEnabled, maxReplicas }: AppProps) {
       showNamespacePicker ||
       detailPod ||
       detailDeployment ||
+      scaleTarget ||
       multiPodView
     )
       return;
@@ -172,27 +187,31 @@ export function App({ mutationsEnabled, maxReplicas }: AppProps) {
           });
         }
       }
+    }
 
-      if (activeTab === 1) {
-        const deployArr = Array.from(deployments.resources.values());
-        const deploy = deployArr[selectedIndex];
-        if (!deploy) return;
-        const name = deploy.metadata?.name ?? "";
-        const ns = deploy.metadata?.namespace ?? "";
+    if (activeTab === 1) {
+      const deployArr = Array.from(deployments.resources.values());
+      const deploy = deployArr[selectedIndex];
+      if (!deploy) return;
+      const name = deploy.metadata?.name ?? "";
+      const ns = deploy.metadata?.namespace ?? "";
 
-        if (mutationsEnabled && input === "R") {
-          setPendingMutation({
-            title: "Confirm Restart",
-            description: `Rollout restart deployment "${name}" in namespace "${ns}"?`,
-            namespace: ns,
-            action: () =>
-              mutate(kubeClient.appsV1 as any, {
-                action: MutationAction.RestartDeployment,
-                name,
-                namespace: ns,
-              }),
-          });
-        }
+      if (mutationsEnabled && input === "R") {
+        setPendingMutation({
+          title: "Confirm Restart",
+          description: `Rollout restart deployment "${name}" in namespace "${ns}"?`,
+          namespace: ns,
+          action: () =>
+            mutate(kubeClient.appsV1 as any, {
+              action: MutationAction.RestartDeployment,
+              name,
+              namespace: ns,
+            }),
+        });
+      }
+
+      if (mutationsEnabled && input === "s") {
+        setScaleTarget(deploy);
       }
     }
   });
@@ -211,6 +230,36 @@ export function App({ mutationsEnabled, maxReplicas }: AppProps) {
       const phase = pod.status?.phase ?? "Unknown";
       const restarts = cs.reduce((sum, s) => sum + (s.restartCount ?? 0), 0);
       const node = (pod.spec?.nodeName ?? "").slice(0, 18);
+
+      const metricKey = `${pod.metadata?.namespace ?? ""}/${pod.metadata?.name ?? ""}`;
+      const usage = metrics.podMetrics.get(metricKey);
+      // Percentage against the pod's own requested resources, when set —
+      // otherwise show raw usage with no color (nothing to compare against).
+      const requests = (pod.spec?.containers ?? []).reduce(
+        (sum, c) => {
+          const cpuReq = c.resources?.requests?.["cpu"];
+          const memReq = c.resources?.requests?.["memory"];
+          const cpuMilli = cpuReq ? parseCpuToMillicores(cpuReq) : null;
+          const memB = memReq ? parseMemoryToBytes(memReq) : null;
+          return {
+            cpu: sum.cpu + (cpuMilli ?? 0),
+            mem: sum.mem + (memB ?? 0),
+            cpuSeen: sum.cpuSeen || cpuMilli !== null,
+            memSeen: sum.memSeen || memB !== null,
+          };
+        },
+        { cpu: 0, mem: 0, cpuSeen: false, memSeen: false },
+      );
+      const cpuPct =
+        usage?.cpuMillicores != null && requests.cpuSeen && requests.cpu > 0
+          ? (usage.cpuMillicores / requests.cpu) * 100
+          : null;
+      const memPct =
+        usage?.memBytes != null && requests.memSeen && requests.mem > 0
+          ? (usage.memBytes / requests.mem) * 100
+          : null;
+      const hist = metrics.podHistory.get(metricKey);
+
       return {
         uid: pod.metadata?.uid ?? "",
         name: pod.metadata?.name ?? "",
@@ -220,8 +269,23 @@ export function App({ mutationsEnabled, maxReplicas }: AppProps) {
         extra: `${phase} ${readyCount}/${cs.length || "?"}`,
         extra2: restarts > 0 ? `↺${restarts}  ${node}` : node,
         extra3: pod.status?.podIP ?? "",
+        cpu: metrics.available ? formatCpu(usage?.cpuMillicores) : undefined,
+        cpuColor: usageColor(cpuPct),
+        cpuSpark: trendSpark(hist?.cpu, requests.cpuSeen ? requests.cpu : 0),
+        mem: metrics.available ? formatMemBytes(usage?.memBytes) : undefined,
+        memColor: usageColor(memPct),
+        memSpark: trendSpark(hist?.mem, requests.memSeen ? requests.mem : 0),
       };
     });
+  }
+
+  /** Renders a trend sparkline capped to SPARK_SAMPLES chars (the table
+   * reserves exactly that much room) once at least 2 samples exist. Bars are
+   * sized/colored by percent of `referenceTotal` (a request/allocatable
+   * total) when known, rather than the window's own max — see usageSpark(). */
+  function trendSpark(samples: number[] | undefined, referenceTotal: number) {
+    if (!samples || samples.length < 2) return undefined;
+    return usageSpark(samples.slice(-SPARK_SAMPLES), referenceTotal);
   }
 
   function buildDeploymentRows(): ResourceRow[] {
@@ -297,6 +361,20 @@ export function App({ mutationsEnabled, maxReplicas }: AppProps) {
           .join(",") || "worker";
       const version = n.status?.nodeInfo?.kubeletVersion ?? "";
       const pressure = nodePressureLabel(n);
+
+      const usage = metrics.nodeMetrics.get(n.metadata?.name ?? "");
+      const allocCpu = parseCpuToMillicores(n.status?.allocatable?.["cpu"]);
+      const allocMem = parseMemoryToBytes(n.status?.allocatable?.["memory"]);
+      const cpuPct =
+        usage?.cpuMillicores != null && allocCpu
+          ? (usage.cpuMillicores / allocCpu) * 100
+          : null;
+      const memPct =
+        usage?.memBytes != null && allocMem
+          ? (usage.memBytes / allocMem) * 100
+          : null;
+      const hist = metrics.nodeHistory.get(n.metadata?.name ?? "");
+
       return {
         uid: n.metadata?.uid ?? "",
         name: n.metadata?.name ?? "",
@@ -308,6 +386,12 @@ export function App({ mutationsEnabled, maxReplicas }: AppProps) {
         extra3: pressure
           ? `⚠ ${pressure}`
           : (n.status?.nodeInfo?.osImage ?? "").slice(0, 20),
+        cpu: metrics.available ? formatCpu(usage?.cpuMillicores) : undefined,
+        cpuColor: usageColor(cpuPct),
+        cpuSpark: trendSpark(hist?.cpu, allocCpu ?? 0),
+        mem: metrics.available ? formatMemBytes(usage?.memBytes) : undefined,
+        memColor: usageColor(memPct),
+        memSpark: trendSpark(hist?.mem, allocMem ?? 0),
       };
     });
   }
@@ -412,21 +496,24 @@ export function App({ mutationsEnabled, maxReplicas }: AppProps) {
     pvcs.loading,
   ];
 
+  // Every detail/overlay view (PodDetail, DeploymentDetail, ScaleModal,
+  // MultiPodLogView, ContextSwitcher, NamespacePicker, ConfirmModal) already
+  // shows its own hint text internally, so the global footer below is only
+  // relevant for the plain resource-table browsing view — showing it during
+  // an overlay would just duplicate (and risk drifting out of sync with)
+  // hints that view already displays.
+  const showGlobalFooter =
+    !detailPod &&
+    !detailDeployment &&
+    !scaleTarget &&
+    !multiPodView &&
+    !showContextSwitcher &&
+    !showNamespacePicker &&
+    !pendingMutation;
+
   function getFooterHints(): string {
-    if (showContextSwitcher || showNamespacePicker || pendingMutation) {
-      return "[↑↓] Navigate  [Enter] Select  [Esc] Cancel";
-    }
-    if (detailPod) {
-      return "[↑↓] Scroll  [[] []] Container  [f] Follow  [/] Search  [h] Restarts  [e] Export  [Esc] Close";
-    }
-    if (detailDeployment) {
-      return "[↑↓] Nav  [r/Enter] Rollback  [Esc] Close";
-    }
-    if (multiPodView) {
-      return "[↑↓] Scroll  [Esc] Close";
-    }
     const nsLabel = activeNamespace === "all" ? "all" : activeNamespace;
-    const base = `[↑↓] Nav  [Tab] Switch  [/] Search  [c] Context  [n] NS:${nsLabel}  [q] Quit`;
+    const base = `[↑↓] Nav  [Tab] Switch  [/] Search  [*] Favourite  [c] Context  [n] NS:${nsLabel}  [q] Quit`;
     if (activeTab === 0) {
       return mutationsEnabled
         ? base + "  [Space] Select  [Enter] Detail  [d] Delete  [D] Force-del"
@@ -466,7 +553,10 @@ export function App({ mutationsEnabled, maxReplicas }: AppProps) {
         </Text>
         <Box>
           <Text dimColor>context: {kubeClient.currentContext} </Text>
-          <Text dimColor>ns: {activeNamespace}</Text>
+          <Text dimColor>ns: {activeNamespace} </Text>
+          {metrics.available === false && (
+            <Text dimColor>(metrics-server not found) </Text>
+          )}
         </Box>
         <Text color={connectionError ? "yellow" : "green"}>
           {connectionError ? "⚠ reconnecting..." : "● connected"}
@@ -489,40 +579,6 @@ export function App({ mutationsEnabled, maxReplicas }: AppProps) {
         tabSummaries={tabSummaries}
       />
 
-      {/* Status summary bar — hidden when overlay/detail is active */}
-      {!detailPod &&
-        !multiPodView &&
-        !showContextSwitcher &&
-        !pendingMutation && (
-          <Box paddingX={1}>
-            {(() => {
-              const rows = tabRows[activeTab];
-              const total = rows.length;
-              const critical = rows.filter(
-                (r) => r.status === HealthStatus.Critical,
-              ).length;
-              const degraded = rows.filter(
-                (r) => r.status === HealthStatus.Degraded,
-              ).length;
-              const healthy = rows.filter(
-                (r) => r.status === HealthStatus.Healthy,
-              ).length;
-              return (
-                <>
-                  <Text dimColor>{total} total </Text>
-                  {critical > 0 && (
-                    <Text color="red">{critical} ● critical </Text>
-                  )}
-                  {degraded > 0 && (
-                    <Text color="yellow">{degraded} ● degraded </Text>
-                  )}
-                  <Text color="green">{healthy} ● healthy</Text>
-                </>
-              );
-            })()}
-          </Box>
-        )}
-
       {/* Main content */}
       <Box flexGrow={1} paddingX={1}>
         {multiPodView ? (
@@ -531,6 +587,7 @@ export function App({ mutationsEnabled, maxReplicas }: AppProps) {
               selectedPodUids.has(p.metadata?.uid ?? ""),
             )}
             kubeConfig={kubeClient.kubeConfig}
+            maxHeight={contentMaxHeight}
             onClose={() => {
               setMultiPodView(false);
               setSelectedPodUids(new Set());
@@ -542,6 +599,10 @@ export function App({ mutationsEnabled, maxReplicas }: AppProps) {
             kubeConfig={kubeClient.kubeConfig}
             onClose={() => setDetailPod(null)}
             restartHistory={restartHistory}
+            metricsHistory={metrics.podHistory.get(
+              `${detailPod.metadata?.namespace ?? ""}/${detailPod.metadata?.name ?? ""}`,
+            )}
+            maxHeight={contentMaxHeight}
           />
         ) : detailDeployment ? (
           <DeploymentDetail
@@ -593,6 +654,35 @@ export function App({ mutationsEnabled, maxReplicas }: AppProps) {
               setSelectedIndex(0);
             }}
             onClose={() => setShowNamespacePicker(false)}
+          />
+        ) : scaleTarget ? (
+          <ScaleModal
+            name={scaleTarget.metadata?.name ?? ""}
+            namespace={scaleTarget.metadata?.namespace ?? ""}
+            currentReplicas={scaleTarget.spec?.replicas ?? 0}
+            maxReplicas={maxReplicas}
+            isProduction={PROTECTED_NAMESPACES.has(
+              scaleTarget.metadata?.namespace ?? "",
+            )}
+            onConfirm={(replicas) => {
+              const name = scaleTarget.metadata?.name ?? "";
+              const ns = scaleTarget.metadata?.namespace ?? "";
+              setScaleTarget(null);
+              setPendingMutation({
+                title: "Confirm Scale",
+                description: `Scale deployment "${name}" in namespace "${ns}" to ${replicas} replica${replicas === 1 ? "" : "s"}?`,
+                namespace: ns,
+                action: () =>
+                  mutate(kubeClient.appsV1 as any, {
+                    action: MutationAction.ScaleDeployment,
+                    name,
+                    namespace: ns,
+                    replicas,
+                    maxReplicas,
+                  }),
+              });
+            }}
+            onCancel={() => setScaleTarget(null)}
           />
         ) : pendingMutation ? (
           <ConfirmModal
@@ -656,17 +746,19 @@ export function App({ mutationsEnabled, maxReplicas }: AppProps) {
         )}
       </Box>
 
-      {/* Footer */}
-      <Box
-        paddingX={1}
-        borderStyle="single"
-        borderTop={true}
-        borderBottom={false}
-        borderLeft={false}
-        borderRight={false}
-      >
-        <Text dimColor>{getFooterHints()}</Text>
-      </Box>
+      {/* Footer — only for the resource-table view; overlays show their own hints */}
+      {showGlobalFooter && (
+        <Box
+          paddingX={1}
+          borderStyle="single"
+          borderTop={true}
+          borderBottom={false}
+          borderLeft={false}
+          borderRight={false}
+        >
+          <Text dimColor>{getFooterHints()}</Text>
+        </Box>
+      )}
     </Box>
   );
 }

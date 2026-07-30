@@ -3,16 +3,7 @@ import { Box, Text, useInput } from "ink";
 import type { V1Pod } from "@kubernetes/client-node";
 import type { RestartHistory } from "../hooks/useRestartHistory.js";
 import { formatAge } from "../utils/format.js";
-
-const SPARK_CHARS = ["▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"];
-
-function sparkline(counts: number[]): string {
-  if (counts.length === 0) return "no data";
-  const max = Math.max(...counts, 1);
-  return counts
-    .map((c) => SPARK_CHARS[Math.min(7, Math.floor((c / max) * 7))])
-    .join("");
-}
+import { sparkline } from "../utils/sparkline.js";
 
 interface RestartGraphProps {
   pod: V1Pod;
@@ -40,7 +31,7 @@ export function RestartGraph({ pod, history, onClose }: RestartGraphProps) {
         <Text bold color="cyan">
           Restart History — {pod.metadata?.name}
         </Text>
-        <Text dimColor>[Esc] close</Text>
+        <Text dimColor>[Esc] Close</Text>
       </Box>
 
       <Box

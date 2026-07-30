@@ -5,6 +5,7 @@ A Node.js TUI for inspecting and monitoring Kubernetes clusters in real-time.
 ## Features
 
 - Live watch of Pods, Deployments, Services, Namespaces, Nodes, and Events
+- CPU/memory usage columns for Pods and Nodes via the metrics-server API (`kubectl top`-style), color-coded against requests/allocatable capacity, each with a session trend sparkline; hidden automatically if metrics-server isn't installed or the terminal is too narrow
 - Color-coded health status (🟢 green / 🟡 yellow / 🔴 red)
 - Per-tab resource counts and critical indicators in the tab bar
 - Status summary bar showing total / critical / degraded / healthy counts
@@ -109,7 +110,7 @@ All mutations require explicit `y` confirmation. No action is ever triggered aut
 ## Development
 
 ```bash
-npm test           # Run all tests (43 tests, 9 files)
+npm test           # Run all tests (66 tests, 11 files)
 npm run test:watch # Watch mode
 npm run build      # Compile TypeScript to dist/
 ```
@@ -124,13 +125,15 @@ src/
 │   ├── useKubeClient.ts   # Loads kubeconfig, exposes context switching
 │   ├── useResources.ts    # Watch-based live resource state (reconnects on disconnect)
 │   ├── useLogStream.ts    # Streams pod logs into a ring buffer (last 500 lines); supports timestamps, previous, sinceSeconds, tailLines
-│   └── useAlerts.ts       # Derives alerts from critical state transitions
+│   ├── useAlerts.ts       # Derives alerts from critical state transitions
+│   └── useMetrics.ts      # Polls metrics.k8s.io (metrics-server) for pod/node CPU+memory usage
 ├── components/
-│   ├── ResourceTable.tsx  # Scrollable table with search, adaptive columns, spinner, progress bar
+│   ├── ResourceTable.tsx  # Scrollable table with search, adaptive columns, spinner, progress bar, CPU/MEM columns
 │   ├── StatusBadge.tsx    # Color-coded ● health indicator
 │   ├── NavTabs.tsx        # Tab bar with resource count badges and critical indicators
 │   ├── AlertBanner.tsx    # Critical alert banner with queue counter, auto-dismisses after 5s
 │   ├── ConfirmModal.tsx   # Mutation confirmation overlay — never self-triggers
+│   ├── ScaleModal.tsx     # Replica stepper for deployment scaling — hands off to ConfirmModal
 │   ├── ContextSwitcher.tsx# Kubeconfig context switcher with / search filter
 │   ├── PodDetail.tsx      # Pod detail: container statuses + full-featured log view
 │   ├── SplitLogView.tsx   # Side-by-side log comparison for multi-container pods
@@ -139,5 +142,7 @@ src/
     ├── health.ts          # Pure functions: classify resource health
     ├── format.ts          # Pure functions: format age/durations
     ├── logLevel.ts        # Shared log level types, keywords, color, filter helpers
+    ├── metrics.ts          # Pure functions: parse/format CPU+memory quantities, usage color thresholds
+    ├── sparkline.ts        # Renders a number series as a Unicode block trend line
     └── mutate.ts          # Only file that calls k8s write APIs — always audits
 ```

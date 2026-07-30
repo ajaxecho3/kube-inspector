@@ -87,6 +87,8 @@ export function useLogStream(
       });
 
       try {
+        // log.log() resolves to an AbortController (not a stream/socket handle) —
+        // cancelling the in-flight HTTP request requires calling .abort(), not .destroy().
         const req = await log.log(
           namespace,
           podName,
@@ -101,10 +103,10 @@ export function useLogStream(
           },
         );
         if (!active) {
-          (req as any).destroy?.();
+          req.abort();
           return;
         }
-        abortRequest = () => (req as any).destroy?.();
+        abortRequest = () => req.abort();
         setError(null);
       } catch (err: unknown) {
         if (!active) return;

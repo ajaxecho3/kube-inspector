@@ -29,7 +29,6 @@ export function DeploymentDetail({
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [cursor, setCursor] = useState(0);
-  const [confirmRollback, setConfirmRollback] = useState<Revision | null>(null);
 
   const name = deployment.metadata?.name ?? "";
   const namespace = deployment.metadata?.namespace ?? "default";
@@ -84,51 +83,18 @@ export function DeploymentDetail({
     fetchReplicaSets();
   }, []);
 
+  // Rollback confirmation happens once, in the shared ConfirmModal (which
+  // also shows the production-namespace warning) — App.tsx's onRollback
+  // wraps this call in that flow, so this view doesn't need its own.
   useInput((input, key) => {
-    if (confirmRollback) {
-      if (input === "y" || key.return) {
-        onRollback?.(deployment, confirmRollback.revision);
-        setConfirmRollback(null);
-        onClose();
-      }
-      if (input === "n" || key.escape) setConfirmRollback(null);
-      return;
-    }
     if (key.escape) { onClose(); return; }
     if (key.upArrow) setCursor((i) => Math.max(0, i - 1));
     if (key.downArrow) setCursor((i) => Math.min(revisions.length - 1, i + 1));
     if ((input === "r" || key.return) && revisions[cursor]) {
       const rev = revisions[cursor];
-      if (rev.revision !== currentRevision) setConfirmRollback(rev);
+      if (rev.revision !== currentRevision) onRollback?.(deployment, rev.revision);
     }
   });
-
-  if (confirmRollback) {
-    return (
-      <Box
-        flexDirection="column"
-        borderStyle="round"
-        borderColor="yellow"
-        padding={1}
-      >
-        <Text bold color="yellow">
-          Confirm Rollback
-        </Text>
-        <Text>
-          Roll back <Text bold>{name}</Text> to revision{" "}
-          <Text bold color="cyan">
-            #{confirmRollback.revision}
-          </Text>
-          ?
-        </Text>
-        <Text dimColor>Image: {confirmRollback.image}</Text>
-        <Box marginTop={1}>
-          <Text color="green">[y/Enter] Confirm </Text>
-          <Text color="red">[n/Esc] Cancel</Text>
-        </Box>
-      </Box>
-    );
-  }
 
   return (
     <Box
