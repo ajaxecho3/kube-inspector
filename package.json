@@ -5,6 +5,12 @@
   "description": "A Node.js TUI for inspecting and monitoring Kubernetes clusters in real-time — pods, deployments, services, nodes, and more, live in your terminal.",
   "type": "module",
   "main": "dist/index.js",
+  "bin": {
+    "kube-inspector": "dist/index.js"
+  },
+  "files": [
+    "dist"
+  ],
   "engines": {
     "node": ">=20"
   },
@@ -21,7 +27,9 @@
   "homepage": "https://github.com/ajaxecho3/kube-inspector#readme",
   "scripts": {
     "start": "node --no-deprecation --import tsx/esm src/index.tsx",
-    "build": "tsc",
+    "build": "tsc -p tsconfig.build.json",
+    "postbuild": "chmod +x dist/index.js",
+    "typecheck": "tsc -p tsconfig.json",
     "test": "vitest run",
     "test:watch": "vitest"
   },

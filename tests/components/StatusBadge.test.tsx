@@ -1,8 +1,8 @@
 import React from "react";
 import { describe, it, expect } from "vitest";
 import { render } from "ink-testing-library";
-import { StatusBadge } from "../../src/components/StatusBadge";
-import { HealthStatus } from "../../src/utils/health";
+import { StatusBadge } from "../../src/components/StatusBadge.js";
+import { HealthStatus } from "../../src/utils/health.js";
 
 describe("StatusBadge", () => {
   it("renders a dot for healthy status", () => {

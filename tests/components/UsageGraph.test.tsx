@@ -1,7 +1,7 @@
 import React from "react";
 import { describe, it, expect } from "vitest";
 import { render } from "ink-testing-library";
-import { UsageGraph, bucketValues, buildAxisLine } from "../../src/components/UsageGraph";
+import { UsageGraph, bucketValues, buildAxisLine } from "../../src/components/UsageGraph.js";
 import type { V1Pod } from "@kubernetes/client-node";
 
 function makePod(cpuRequest?: string, memRequest?: string): V1Pod {

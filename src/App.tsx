@@ -609,11 +609,7 @@ export function App({ mutationsEnabled, maxReplicas }: AppProps) {
             deployment={detailDeployment}
             kubeConfig={kubeClient.kubeConfig}
             onClose={() => setDetailDeployment(null)}
-            onRollback={(deploy, revision) => {
-              const rs = Array.from(deployments.resources.values()).find(
-                (d) => d.metadata?.uid === deploy.metadata?.uid,
-              );
-              if (!rs) return;
+            onRollback={(deploy, revision, replicaSet) => {
               const name = deploy.metadata?.name ?? "";
               const ns = deploy.metadata?.namespace ?? "";
               setPendingMutation({
@@ -625,7 +621,10 @@ export function App({ mutationsEnabled, maxReplicas }: AppProps) {
                     action: MutationAction.RollbackDeployment,
                     name,
                     namespace: ns,
-                    templateSpec: deploy.spec?.template?.spec as Record<string, unknown>,
+                    // The target revision's own ReplicaSet template — NOT the
+                    // current deployment's template, which is what's being
+                    // rolled back *from*.
+                    templateSpec: replicaSet.spec?.template?.spec as unknown as Record<string, unknown>,
                     revision,
                   }),
               });

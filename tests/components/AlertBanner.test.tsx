@@ -1,7 +1,7 @@
 import React from "react";
 import { describe, it, expect } from "vitest";
 import { render } from "ink-testing-library";
-import { AlertBanner } from "../../src/components/AlertBanner";
+import { AlertBanner } from "../../src/components/AlertBanner.js";
 
 describe("AlertBanner", () => {
   it("renders the alert message", () => {

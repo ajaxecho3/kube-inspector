@@ -1,7 +1,7 @@
 import React from "react";
 import { describe, it, expect } from "vitest";
 import { render } from "ink-testing-library";
-import { NavTabs, TAB_LABELS } from "../../src/components/NavTabs";
+import { NavTabs, TAB_LABELS } from "../../src/components/NavTabs.js";
 
 describe("NavTabs", () => {
   it("renders all tab labels", () => {
@@ -22,7 +22,7 @@ describe("NavTabs", () => {
   });
 
   it("shows resource count when tabSummaries provided", () => {
-    const summaries = TAB_LABELS.map((_, i) => ({ total: i + 1, critical: 0 }));
+    const summaries = TAB_LABELS.map((_: string, i: number) => ({ total: i + 1, critical: 0 }));
     const { lastFrame } = render(
       <NavTabs activeTab={0} onTabChange={() => {}} tabSummaries={summaries} />,
     );

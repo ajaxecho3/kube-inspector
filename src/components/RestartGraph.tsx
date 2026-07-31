@@ -100,9 +100,9 @@ export function RestartGraph({ pod, history, onClose }: RestartGraphProps) {
       })}
 
       {containers.length === 0 && (
-        <Text dimColor marginTop={1}>
-          No container data available.
-        </Text>
+        <Box marginTop={1}>
+          <Text dimColor>No container data available.</Text>
+        </Box>
       )}
 
       <Box marginTop={1}>

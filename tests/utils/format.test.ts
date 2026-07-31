@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { formatAge } from "../../src/utils/format";
+import { formatAge } from "../../src/utils/format.js";
 
 describe("formatAge", () => {
   beforeEach(() => {
