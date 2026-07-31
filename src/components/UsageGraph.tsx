@@ -166,12 +166,16 @@ export function buildAxisLine(sampleCount: number, intervalMs: number): string {
         : elapsedSec >= 60
           ? `-${Math.round(elapsedSec / 60)}m`
           : `-${Math.round(elapsedSec)}s`;
-    // Anchor the label so it ENDS at `col` rather than starting there —
-    // otherwise the rightmost tick ("now") has nowhere to grow into and gets
-    // clipped to a single character at the display's right edge.
+    // Anchor the label so it ends at `col` (rather than starting there), then
+    // clamp it fully inside [0, WIDTH) — end-anchoring alone still clips the
+    // leftmost tick (e.g. "-5m" at col 0 would render as just "m"), the same
+    // way start-anchoring alone clips the rightmost ("now") tick. Clamping
+    // guarantees every label stays fully visible, just nudged off its exact
+    // tick column when it's right at an edge.
+    const idealStart = col - (label.length - 1);
+    const start = Math.max(0, Math.min(WIDTH - label.length, idealStart));
     for (let i = 0; i < label.length; i++) {
-      const pos = col - (label.length - 1) + i;
-      if (pos >= 0 && pos < WIDTH) chars[pos] = label[i];
+      chars[start + i] = label[i];
     }
   }
   return chars.join("");

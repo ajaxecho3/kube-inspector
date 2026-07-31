@@ -55,6 +55,11 @@ describe("buildAxisLine", () => {
     const line = buildAxisLine(240, 15_000); // 1 hour of samples at the default poll interval
     expect(line).toMatch(/-\d+m/);
   });
+
+  it("does not clip the leftmost tick's label (regression: used to render as just 'm')", () => {
+    const line = buildAxisLine(20, 15_000);
+    expect(line.trim().startsWith("-5m")).toBe(true);
+  });
 });
 
 describe("UsageGraph", () => {
