@@ -1,7 +1,6 @@
 {
   "name": "kube-inspector",
   "version": "1.0.0",
-  "private": true,
   "description": "A Node.js TUI for inspecting and monitoring Kubernetes clusters in real-time — pods, deployments, services, nodes, and more, live in your terminal.",
   "type": "module",
   "main": "dist/index.js",
