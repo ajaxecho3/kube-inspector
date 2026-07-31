@@ -1,20 +1,42 @@
 {
   "name": "kube-inspector",
   "version": "1.0.0",
-  "description": "",
+  "private": true,
+  "description": "A Node.js TUI for inspecting and monitoring Kubernetes clusters in real-time — pods, deployments, services, nodes, and more, live in your terminal.",
   "type": "module",
-  "main": "index.js",
+  "main": "dist/index.js",
+  "engines": {
+    "node": ">=20"
+  },
   "directories": {
     "doc": "docs"
   },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ajaxecho3/kube-inspector.git"
+  },
+  "bugs": {
+    "url": "https://github.com/ajaxecho3/kube-inspector/issues"
+  },
+  "homepage": "https://github.com/ajaxecho3/kube-inspector#readme",
   "scripts": {
     "start": "node --no-deprecation --import tsx/esm src/index.tsx",
     "build": "tsc",
     "test": "vitest run",
     "test:watch": "vitest"
   },
-  "keywords": [],
-  "author": "",
+  "keywords": [
+    "kubernetes",
+    "k8s",
+    "tui",
+    "cli",
+    "terminal",
+    "devops",
+    "monitoring",
+    "ink",
+    "react"
+  ],
+  "author": "ajaxecho3",
   "license": "ISC",
   "dependencies": {
     "@kubernetes/client-node": "^1.4.0",
