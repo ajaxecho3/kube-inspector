@@ -1,7 +1,7 @@
 import React from "react";
 import { describe, it, expect, vi } from "vitest";
 import { render } from "ink-testing-library";
-import { ConfirmModal } from "../../src/components/ConfirmModal";
+import { ConfirmModal } from "../../src/components/ConfirmModal.js";
 
 describe("ConfirmModal", () => {
   it("renders the action description", () => {

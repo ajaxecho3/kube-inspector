@@ -1,6 +1,7 @@
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { setHeaderOptions } from "@kubernetes/client-node";
 
 export enum MutationAction {
   DeletePod = "DeletePod",
@@ -74,71 +75,86 @@ export async function mutate(client: any, params: MutateParams): Promise<void> {
     namespace: params.namespace,
   };
 
+  // The installed @kubernetes/client-node version only exposes the
+  // object-param calling convention (e.g. `deleteNamespacedPod({ name,
+  // namespace })`) — every call below must use that shape, not the old
+  // positional-argument style. Patch calls also need this: by default the
+  // generated client negotiates a JSON-Patch content type for `patch*`
+  // methods, which would misinterpret our plain merge-patch-shaped body as a
+  // JSON-Patch operation array. `setHeaderOptions` forces the Content-Type
+  // header via a middleware that runs after the request is built, so the
+  // (identically-serialized) JSON body gets read as a merge patch instead.
+  const mergePatchOptions = setHeaderOptions(
+    "Content-Type",
+    "application/merge-patch+json",
+  );
+
   try {
     switch (params.action) {
       case MutationAction.DeletePod:
-        await client.deleteNamespacedPod(params.name, params.namespace);
+        await client.deleteNamespacedPod({
+          name: params.name,
+          namespace: params.namespace,
+        });
         break;
       case MutationAction.ForceDeletePod:
-        await client.deleteNamespacedPod(
-          params.name,
-          params.namespace,
-          undefined,
-          undefined,
-          0,
-        );
+        await client.deleteNamespacedPod({
+          name: params.name,
+          namespace: params.namespace,
+          gracePeriodSeconds: 0,
+        });
         break;
       case MutationAction.DeleteDeployment:
-        await client.deleteNamespacedDeployment(params.name, params.namespace);
+        await client.deleteNamespacedDeployment({
+          name: params.name,
+          namespace: params.namespace,
+        });
         break;
       case MutationAction.DeleteService:
-        await client.deleteNamespacedService(params.name, params.namespace);
+        await client.deleteNamespacedService({
+          name: params.name,
+          namespace: params.namespace,
+        });
         break;
       case MutationAction.RestartDeployment: {
         const now = new Date().toISOString();
         await client.patchNamespacedDeployment(
-          params.name,
-          params.namespace,
           {
-            spec: {
-              template: {
-                metadata: {
-                  annotations: { "kubectl.kubernetes.io/restartedAt": now },
+            name: params.name,
+            namespace: params.namespace,
+            body: {
+              spec: {
+                template: {
+                  metadata: {
+                    annotations: { "kubectl.kubernetes.io/restartedAt": now },
+                  },
                 },
               },
             },
           },
-          undefined,
-          undefined,
-          undefined,
-          undefined,
-          { headers: { "Content-Type": "application/merge-patch+json" } },
+          mergePatchOptions,
         );
         break;
       }
       case MutationAction.RollbackDeployment: {
         await client.patchNamespacedDeployment(
-          params.name,
-          params.namespace,
-          { spec: { template: { spec: params.templateSpec } } },
-          undefined,
-          undefined,
-          undefined,
-          undefined,
-          { headers: { "Content-Type": "application/merge-patch+json" } },
+          {
+            name: params.name,
+            namespace: params.namespace,
+            body: { spec: { template: { spec: params.templateSpec } } },
+          },
+          mergePatchOptions,
         );
         break;
       }
       case MutationAction.ScaleDeployment:
         await client.patchNamespacedDeploymentScale(
-          params.name,
-          params.namespace,
-          { spec: { replicas: params.replicas } },
-          undefined,
-          undefined,
-          undefined,
-          undefined,
-          { headers: { "Content-Type": "application/merge-patch+json" } },
+          {
+            name: params.name,
+            namespace: params.namespace,
+            body: { spec: { replicas: params.replicas } },
+          },
+          mergePatchOptions,
         );
         break;
     }

@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { sparkline, charForRatio } from "../../src/utils/sparkline";
+import { sparkline, charForRatio } from "../../src/utils/sparkline.js";
 
 describe("sparkline", () => {
   it("returns a placeholder for an empty series", () => {

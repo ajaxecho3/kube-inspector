@@ -16,7 +16,10 @@ interface DeploymentDetailProps {
   deployment: V1Deployment;
   kubeConfig: KubeConfig;
   onClose: () => void;
-  onRollback?: (deployment: V1Deployment, revision: number) => void;
+  /** `replicaSet` is the target revision's ReplicaSet — its pod template is
+   * what actually gets restored on rollback (the current deployment's own
+   * template is the thing being rolled back *from*, not the target). */
+  onRollback?: (deployment: V1Deployment, revision: number, replicaSet: V1ReplicaSet) => void;
 }
 
 export function DeploymentDetail({
@@ -45,16 +48,12 @@ export function DeploymentDetail({
           .map(([k, v]) => `${k}=${v}`)
           .join(",");
 
-        const res = await appsV1.listNamespacedReplicaSet(
+        const res = await appsV1.listNamespacedReplicaSet({
           namespace,
-          undefined,
-          undefined,
-          undefined,
-          undefined,
           labelSelector,
-        );
+        });
 
-        const rsList = (res.body?.items ?? []) as V1ReplicaSet[];
+        const rsList = (res.items ?? []) as V1ReplicaSet[];
         const parsed: Revision[] = rsList
           .map((rs) => {
             const rev = Number(
@@ -92,7 +91,7 @@ export function DeploymentDetail({
     if (key.downArrow) setCursor((i) => Math.min(revisions.length - 1, i + 1));
     if ((input === "r" || key.return) && revisions[cursor]) {
       const rev = revisions[cursor];
-      if (rev.revision !== currentRevision) onRollback?.(deployment, rev.revision);
+      if (rev.revision !== currentRevision) onRollback?.(deployment, rev.revision, rev.rs);
     }
   });
 
@@ -143,11 +142,15 @@ export function DeploymentDetail({
       </Box>
 
       {/* Loading / error */}
-      {loading && <Text dimColor marginTop={1}>  Loading revisions...</Text>}
+      {loading && (
+        <Box marginTop={1}>
+          <Text dimColor>  Loading revisions...</Text>
+        </Box>
+      )}
       {error && (
-        <Text color="red" marginTop={1}>
-          {" "}Error: {error}
-        </Text>
+        <Box marginTop={1}>
+          <Text color="red"> Error: {error}</Text>
+        </Box>
       )}
 
       {/* Revision list */}
@@ -186,9 +189,9 @@ export function DeploymentDetail({
         })}
 
       {!loading && !error && revisions.length === 0 && (
-        <Text dimColor marginTop={1}>
-          {" "}No revision history found. Ensure revisionHistoryLimit &gt; 0.
-        </Text>
+        <Box marginTop={1}>
+          <Text dimColor> No revision history found. Ensure revisionHistoryLimit &gt; 0.</Text>
+        </Box>
       )}
     </Box>
   );

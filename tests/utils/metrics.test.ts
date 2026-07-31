@@ -7,7 +7,7 @@ import {
   usageColor,
   brighten,
   usageSpark,
-} from "../../src/utils/metrics";
+} from "../../src/utils/metrics.js";
 
 describe("parseCpuToMillicores", () => {
   it("parses nanocores", () => {

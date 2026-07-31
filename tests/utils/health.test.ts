@@ -4,7 +4,7 @@ import {
   deploymentHealth,
   nodeHealth,
   HealthStatus,
-} from "../../src/utils/health";
+} from "../../src/utils/health.js";
 
 describe("podHealth", () => {
   it("returns healthy for Running phase", () => {
